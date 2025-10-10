@@ -1,103 +1,345 @@
-import Image from "next/image";
+'use client';
 
-export default function Home() {
+import React, { useMemo, useState } from 'react';
+import { Card, CardContent } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Badge } from '@/components/ui/badge';
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheet';
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
+import { Textarea } from '@/components/ui/textarea';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
+import { Slider } from '@/components/ui/slider';
+import { MessageSquare, Filter, MapPin, Star, Clock, ArrowLeft, CheckCircle2 } from 'lucide-react';
+
+// ---- Type definitions ----
+export type View = 'home' | 'detail' | 'proposal' | 'chat' | 'summary' | 'availability';
+export type User = {
+  id: string;
+  name: string;
+  level: string;
+  rating: number;
+  style: string;
+  years: number;
+  prefs: string[];
+  distanceMinWalk: number;
+  slot: string;
+  area: string;
+  intro: string;
+};
+
+const SAMPLE_USERS: User[] = [
+  {
+    id: 'u1',
+    name: 'たろう',
+    level: '中級',
+    rating: 4.8,
+    style: '右シェーク/ドライブ',
+    years: 5,
+    prefs: ['多球', 'ゲーム'],
+    distanceMinWalk: 12,
+    slot: '10/24 19:00–21:00',
+    area: '横浜駅±5km',
+    intro: '○○区で週2練習しています。台確保はお任せください。',
+  },
+  {
+    id: 'u2',
+    name: 'はなこ',
+    level: '初中級',
+    rating: 4.6,
+    style: '右ペン/前陣速攻',
+    years: 2,
+    prefs: ['サーブ', '基礎'],
+    distanceMinWalk: 8,
+    slot: '10/27 09:00–11:00',
+    area: '横浜駅±5km',
+    intro: '基礎練多めでお願いします。',
+  },
+];
+
+export default function App() {
+  const [view, setView] = useState<View>('home');
+  const [selected, setSelected] = useState<User>(SAMPLE_USERS[0]);
+  const [filters, setFilters] = useState({ distance: 5, levelDiff: 1, times: ['平日夜'], prefs: ['多球', 'ゲーム'] });
+  const [proposal, setProposal] = useState({ datetime: '10/24 19:00–21:00', place: '××卓球場 第2卓', memo: 'よろしくお願いします！' });
+  const [messages, setMessages] = useState<{ who: 'me' | 'partner'; text: string }[]>([
+    { who: 'partner', text: '10/24 19:00–21:00 どうですか？' },
+    { who: 'me', text: 'OKです。会場は××卓球場で。' },
+  ]);
+  const [input, setInput] = useState('');
+
+  const sortedUsers = useMemo(() => SAMPLE_USERS.slice().sort((a, b) => b.rating - a.rating), []);
+
+  const Header = (
+    <div className="flex items-center justify-between p-4 border-b">
+      <div className="flex items-center gap-2">
+        {view !== 'home' && (
+          <Button variant="ghost" size="icon" onClick={() => setView('home')}>
+            <ArrowLeft className="h-5 w-5" />
+          </Button>
+        )}
+        <div className="font-semibold">卓球マッチング</div>
+      </div>
+      <div className="flex items-center gap-2">
+        <Select defaultValue="yokohama">
+          <SelectTrigger className="w-[160px]"><SelectValue placeholder="エリア" /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="yokohama">横浜駅±5km</SelectItem>
+            <SelectItem value="shinagawa">品川駅±5km</SelectItem>
+            <SelectItem value="tokyo">東京駅±5km</SelectItem>
+          </SelectContent>
+        </Select>
+        <FilterSheet filters={filters} setFilters={setFilters} />
+        <Button variant="outline" onClick={() => setView('availability')}>可用時間</Button>
+      </div>
+    </div>
+  );
+
   return (
-    <div className="font-sans grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20">
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
+    <div className="min-h-screen bg-gray-50">
+      {Header}
+      {view === 'home' && <HomeList users={sortedUsers} onOpen={(u) => { setSelected(u); setView('detail'); }} />}
+      {view === 'detail' && selected && <ProfileDetail user={selected} onPropose={() => setView('proposal')} onChat={() => setView('chat')} />}
+      {view === 'proposal' && <ProposalEditor proposal={proposal} setProposal={setProposal} onSend={() => setView('chat')} />}
+      {view === 'chat' && (
+        <ChatView
+          user={selected}
+          messages={messages}
+          input={input}
+          setInput={setInput}
+          onSend={() => {
+            if (!input.trim()) return;
+            setMessages([...messages, { who: 'me', text: input }]);
+            setInput('');
+          }}
+          onAgree={() => setView('summary')}
         />
-        <ol className="font-mono list-inside list-decimal text-sm/6 text-center sm:text-left">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] font-mono font-semibold px-1 py-0.5 rounded">
-              app/page.tsx
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
+      )}
+      {view === 'summary' && <SummaryCard user={selected} proposal={proposal} onCalendar={() => alert('端末カレンダー登録のモック')} />}
+      {view === 'availability' && <Availability onBack={() => setView('home')} />}
+    </div>
+  );
+}
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
+function HomeList({ users, onOpen }: { users: User[]; onOpen: (u: User) => void }) {
+  return (
+    <div className="max-w-3xl mx-auto p-4">
+      <Tabs defaultValue="recommend">
+        <TabsList>
+          <TabsTrigger value="recommend">おすすめ</TabsTrigger>
+          <TabsTrigger value="near">近い順</TabsTrigger>
+          <TabsTrigger value="level">レベル近い順</TabsTrigger>
+        </TabsList>
+        <TabsContent value="recommend">
+          <div className="grid gap-4 mt-4">
+            {users.map((u: User) => (
+              <Card key={u.id} className="shadow-sm">
+                <CardContent className="p-4">
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <div className="font-semibold flex items-center gap-2">
+                        {u.name}（{u.level}）
+                        <span className="inline-flex items-center text-sm opacity-80"><Star className="h-4 w-4 mr-1" />{u.rating}</span>
+                      </div>
+                      <div className="text-sm opacity-80">戦型: {u.style}｜年数: {u.years}年｜目的: {u.prefs.join('・')}</div>
+                      <div className="flex items-center gap-3 mt-2 text-sm">
+                        <span className="inline-flex items-center"><Clock className="h-4 w-4 mr-1" />{u.slot}</span>
+                        <span className="inline-flex items-center"><MapPin className="h-4 w-4 mr-1" />徒歩{u.distanceMinWalk}分</span>
+                        <Badge>相性 87</Badge>
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button variant="secondary" onClick={() => onOpen(u)}>詳細</Button>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        </TabsContent>
+      </Tabs>
+    </div>
+  );
+}
+
+function FilterSheet({ filters, setFilters }: any) {
+  const practiceOptions = ['多球', 'サーブ', 'ゲーム', '基礎'];
+  return (
+    <Sheet>
+      <SheetTrigger asChild>
+        <Button variant="outline"><Filter className="h-4 w-4 mr-1" />フィルタ</Button>
+      </SheetTrigger>
+      <SheetContent>
+        <SheetHeader>
+          <SheetTitle>フィルタ</SheetTitle>
+        </SheetHeader>
+        <div className="space-y-6 mt-4">
+          <div>
+            <div className="text-sm mb-2">距離 (km)</div>
+            <Slider defaultValue={[filters.distance]} max={20} step={1} onValueChange={(v) => setFilters({ ...filters, distance: v[0] })} />
+          </div>
+          <div>
+            <div className="text-sm mb-2">レベル差 許容</div>
+            <Select value={String(filters.levelDiff)} onValueChange={(v) => setFilters({ ...filters, levelDiff: Number(v) })}>
+              <SelectTrigger className="w-[120px]"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="0">±0</SelectItem>
+                <SelectItem value="1">±1</SelectItem>
+                <SelectItem value="2">±2</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div>
+            <div className="text-sm mb-2">目的</div>
+            <div className="flex gap-2 flex-wrap">
+              {practiceOptions.map((p: string) => (
+                <Badge
+                  key={p}
+                  variant={filters.prefs.includes(p) ? 'default' : 'secondary'}
+                  className="cursor-pointer"
+                  onClick={() => {
+                    const exists = filters.prefs.includes(p);
+                    setFilters({
+                      ...filters,
+                      prefs: exists ? filters.prefs.filter((x: string) => x !== p) : [...filters.prefs, p],
+                    });
+                  }}
+                >
+                  {p}
+                </Badge>
+              ))}
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <Button variant="secondary" onClick={() => setFilters({ distance: 5, levelDiff: 1, times: ['平日夜'], prefs: ['多球', 'ゲーム'] })}>クリア</Button>
+            <Button onClick={() => (document.activeElement as HTMLElement)?.blur()}>適用</Button>
+          </div>
         </div>
-      </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+function ProfileDetail({ user, onPropose, onChat }: { user: User; onPropose: () => void; onChat: () => void }) {
+  return (
+    <div className="max-w-2xl mx-auto p-4 space-y-4">
+      <Card className="shadow-sm">
+        <CardContent className="p-4 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="font-semibold">{user.name}（{user.level}）</div>
+            <div className="text-sm inline-flex items-center opacity-80"><Star className="h-4 w-4 mr-1" />{user.rating}</div>
+          </div>
+          <div className="text-sm opacity-80">利き手: 右 / 戦型: {user.style} / 年数: {user.years}年</div>
+          <div className="text-sm">エリア: {user.area} / 目的: {user.prefs.join('・')}</div>
+          <div className="text-sm">自己紹介: {user.intro}</div>
+          <div className="flex gap-2 pt-2">
+            <Badge variant="secondary">共通: {user.slot}</Badge>
+            <Badge>相性 87</Badge>
+          </div>
+          <div className="flex gap-2 pt-3">
+            <Button onClick={onPropose}>提案を作る</Button>
+            <Button variant="secondary" onClick={onChat}><MessageSquare className="h-4 w-4 mr-1"/>チャット</Button>
+          </div>
+        </CardContent>
+      </Card>
+      <Card className="shadow-sm">
+        <CardContent className="p-4">
+          <div className="font-semibold mb-2">レビュー</div>
+          <ul className="list-disc ml-5 text-sm space-y-1">
+            <li>マナーが良い</li>
+            <li>多球うまい</li>
+          </ul>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function ChatView({ user, messages, input, setInput, onSend, onAgree }: { user: User; messages: { who: 'me' | 'partner'; text: string }[]; input: string; setInput: (v: string) => void; onSend: () => void; onAgree: () => void }) {
+  return (
+    <div className="max-w-2xl mx-auto p-4">
+      <div className="text-sm opacity-70 mb-2">相手: {user.name}（{user.level}）</div>
+      <div className="border rounded-lg bg-white p-4 h-[360px] overflow-y-auto space-y-3">
+        {messages.map((m, i) => (
+          <div key={i} className={m.who === 'me' ? 'flex justify-end' : 'flex justify-start'}>
+            <div className={m.who === 'me' ? 'rounded-2xl px-3 py-2 text-sm bg-gray-900 text-white' : 'rounded-2xl px-3 py-2 text-sm bg-gray-100'}>{m.text}</div>
+          </div>
+        ))}
+      </div>
+      <div className="flex items-center gap-2 mt-3">
+        <Input placeholder="メッセージ…" value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') onSend(); }} />
+        <Button onClick={onSend}>送信</Button>
+        <Button variant="secondary" onClick={onAgree}><CheckCircle2 className="h-4 w-4 mr-1"/>合意する</Button>
+      </div>
+    </div>
+  );
+}
+
+function ProposalEditor({ proposal, setProposal, onSend }: { proposal: { datetime: string; place: string; memo: string }; setProposal: (v: { datetime: string; place: string; memo: string }) => void; onSend: () => void }) {
+  return (
+    <div className="max-w-xl mx-auto p-4 space-y-3">
+      <div className="text-lg font-semibold">提案を作る</div>
+      <div className="space-y-2">
+        <div className="text-sm">日時</div>
+        <Input value={proposal.datetime} onChange={(e) => setProposal({ ...proposal, datetime: e.target.value })} />
+      </div>
+      <div className="space-y-2">
+        <div className="text-sm">場所</div>
+        <Input value={proposal.place} onChange={(e) => setProposal({ ...proposal, place: e.target.value })} />
+      </div>
+      <div className="space-y-2">
+        <div className="text-sm">メモ</div>
+        <Textarea value={proposal.memo} onChange={(e) => setProposal({ ...proposal, memo: e.target.value })} />
+      </div>
+      <div className="pt-2">
+        <Button onClick={onSend}>送信</Button>
+      </div>
+    </div>
+  );
+}
+
+function SummaryCard({ user, proposal, onCalendar }: { user: User; proposal: { datetime: string; place: string; memo: string }; onCalendar: () => void }) {
+  return (
+    <div className="max-w-xl mx-auto p-6">
+      <Card className="shadow-sm">
+        <CardContent className="p-6 text-center space-y-2">
+          <CheckCircle2 className="h-8 w-8 mx-auto" />
+          <div className="text-lg font-semibold">合意が成立しました！</div>
+          <div className="text-sm">相手: {user.name}（{user.level}）｜相性: 87</div>
+          <div className="text-sm">日時: {proposal.datetime}</div>
+          <div className="text-sm">場所: {proposal.place}</div>
+          <div className="flex gap-2 justify-center pt-3">
+            <Button onClick={onCalendar}>端末カレンダーに追加</Button>
+            <Button variant="secondary">リマインドを受け取る</Button>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function Availability({ onBack }: { onBack: () => void }) {
+  return (
+    <div className="max-w-xl mx-auto p-4 space-y-4">
+      <div className="text-lg font-semibold">可用時間</div>
+      <div className="space-y-2">
+        <div className="text-sm">繰り返し</div>
+        <div className="flex gap-2">
+          <Badge variant="secondary">水 19:00–21:00</Badge>
+          <Badge variant="secondary">土 09:00–12:00</Badge>
+          <Button size="sm">追加</Button>
+        </div>
+      </div>
+      <div className="space-y-2">
+        <div className="text-sm">スポット</div>
+        <div className="flex gap-2 flex-wrap">
+          <Badge>10/24 19:00–21:00 横浜駅周辺</Badge>
+          <Button size="sm">追加</Button>
+        </div>
+      </div>
+      <div className="pt-2">
+        <Button onClick={onBack}>保存</Button>
+      </div>
     </div>
   );
 }
