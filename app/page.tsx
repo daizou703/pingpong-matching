@@ -45,6 +45,17 @@ export type ProfileRow = {
   area_code: string | null;
 };
 
+export type SlotRow = {
+  id: number;
+  user_id: string;
+  start_at: string; // ISO string
+  end_at: string;   // ISO string
+  area_code: string | null;
+  venue_hint: string | null;
+  is_recurring: boolean | null;
+  created_at?: string;
+};
+
 const SAMPLE_USERS: UserRow[] = [
   {
     id: 'u1',
@@ -189,7 +200,7 @@ export default function App() {
         />
       )}
       {view === 'summary' && <SummaryCard user={selected} proposal={proposal} onCalendar={() => alert('端末カレンダー登録のモック')} />}
-      {view === 'availability' && <Availability onBack={() => setView('home')} />}
+      {view === 'availability' && <Availability onBack={() => setView('home')} supaUser={supaUser} />}
       {view === 'profile' && (
         <ProfileEditor
           loading={loadingProfile}
@@ -444,31 +455,164 @@ function SummaryCard({ user, proposal, onCalendar }: { user: UserRow; proposal: 
   );
 }
 
-function Availability({ onBack }: { onBack: () => void }) {
+function Availability({ onBack, supaUser }: { onBack: () => void; supaUser: SupaUser | null }) {
+  const [slots, setSlots] = useState<SlotRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  // フォーム
+  const [start, setStart] = useState<string>(''); // datetime-local
+  const [end, setEnd] = useState<string>('');
+  const [area, setArea] = useState<string>('yokohama');
+  const [venue, setVenue] = useState<string>('');
+
+  // 読み込み
+  useEffect(() => {
+    if (!supaUser) return;
+    (async () => {
+      setLoading(true);
+      const { data, error } = await supabase
+        .from('availability_slots')
+        .select('id,user_id,start_at,end_at,area_code,venue_hint,is_recurring,created_at')
+        .eq('user_id', supaUser.id)
+        .order('start_at', { ascending: true });
+      if (error) console.error('load slots error', error);
+      setSlots((data ?? []) as SlotRow[]);
+      setLoading(false);
+    })();
+  }, [supaUser]);
+
+  // 表示用フォーマッタ
+  function fmt(dt: string) {
+    if (!dt) return '';
+    const d = new Date(dt);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    return `${y}/${m}/${dd} ${hh}:${mm}`;
+  }
+
+  // 追加
+  async function addSlot() {
+    if (!supaUser) { alert('ログインしてください'); return; }
+    if (!start || !end) { alert('開始/終了を入力してください'); return; }
+    const startIso = new Date(start).toISOString();
+    const endIso = new Date(end).toISOString();
+    if (new Date(endIso) <= new Date(startIso)) { alert('終了は開始より後にしてください'); return; }
+
+    setSaving(true);
+    const { data, error } = await supabase
+      .from('availability_slots')
+      .insert({
+        user_id: supaUser.id,
+        start_at: startIso,
+        end_at: endIso,
+        area_code: area,
+        venue_hint: venue || null,
+        is_recurring: false,
+      })
+      .select();
+    setSaving(false);
+
+    if (error) { alert('追加に失敗: ' + error.message); return; }
+    setSlots([...(slots ?? []), ...(data as SlotRow[])]);
+    setStart(''); setEnd(''); setVenue('');
+  }
+
+  // 削除
+  async function removeSlot(id: number) {
+    if (!confirm('このスロットを削除しますか？')) return;
+    const { error } = await supabase.from('availability_slots').delete().eq('id', id);
+    if (error) { alert('削除に失敗: ' + error.message); return; }
+    setSlots(slots.filter(s => s.id !== id));
+  }
+
+  // 未ログイン表示
+  if (!supaUser) {
+    return (
+      <div className="max-w-xl mx-auto p-4 space-y-4">
+        <div className="text-lg font-semibold">可用時間</div>
+        <div className="text-sm text-red-600">ログインすると可用時間を編集できます。</div>
+        <div><Button onClick={onBack}>戻る</Button></div>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-xl mx-auto p-4 space-y-4">
       <div className="text-lg font-semibold">可用時間</div>
-      <div className="space-y-2">
-        <div className="text-sm">繰り返し</div>
-        <div className="flex gap-2">
-          <Badge variant="secondary">水 19:00-21:00</Badge>
-          <Badge variant="secondary">土 09:00-12:00</Badge>
-          <Button size="sm">追加</Button>
-        </div>
-      </div>
-      <div className="space-y-2">
-        <div className="text-sm">スポット</div>
-        <div className="flex gap-2 flex-wrap">
-          <Badge>10/24 19:00-21:00 横浜駅周辺</Badge>
-          <Button size="sm">追加</Button>
-        </div>
-      </div>
+
+      {/* 追加フォーム */}
+      <Card className="shadow-sm">
+        <CardContent className="p-4 space-y-3">
+          <div className="text-sm font-medium">スロットを追加</div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <div className="text-xs mb-1">開始</div>
+              <Input type="datetime-local" value={start} onChange={(e) => setStart(e.target.value)} />
+            </div>
+            <div>
+              <div className="text-xs mb-1">終了</div>
+              <Input type="datetime-local" value={end} onChange={(e) => setEnd(e.target.value)} />
+            </div>
+            <div>
+              <div className="text-xs mb-1">エリア</div>
+              <Select value={area} onValueChange={(v) => setArea(v)}>
+                <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="yokohama">横浜駅±5km</SelectItem>
+                  <SelectItem value="shinagawa">品川駅±5km</SelectItem>
+                  <SelectItem value="tokyo">東京駅±5km</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <div className="text-xs mb-1">会場メモ</div>
+              <Input placeholder="○○卓球場 第2卓 など" value={venue} onChange={(e) => setVenue(e.target.value)} />
+            </div>
+          </div>
+          <div className="pt-1">
+            <Button onClick={addSlot} disabled={saving}>追加</Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* 一覧 */}
+      <Card className="shadow-sm">
+        <CardContent className="p-4">
+          <div className="text-sm font-medium mb-2">登録済みスロット</div>
+          {loading ? (
+            <div>読み込み中...</div>
+          ) : slots.length === 0 ? (
+            <div className="text-sm opacity-70">まだ登録がありません</div>
+          ) : (
+            <div className="space-y-2">
+              {slots.map((s) => (
+                <div key={s.id} className="flex items-center justify-between border rounded-lg p-2 bg-white">
+                  <div className="text-sm">
+                    <div>{fmt(s.start_at)} - {fmt(s.end_at)}</div>
+                    <div className="opacity-70">エリア: {s.area_code ?? '-'}／会場: {s.venue_hint ?? '-'}</div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Badge variant="secondary">ID {s.id}</Badge>
+                    <Button variant="secondary" onClick={() => removeSlot(s.id)}>削除</Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
       <div className="pt-2">
-        <Button onClick={onBack}>保存</Button>
+        <Button onClick={onBack}>戻る</Button>
       </div>
     </div>
   );
 }
+
 
 function ProfileEditor({ loading, profile, onSave, onCancel }: { loading: boolean; profile: ProfileRow | null; onSave: (p: { nickname: string | null; level: number | null; area_code: string | null }) => void; onCancel: () => void }) {
   const [nickname, setNickname] = useState(profile?.nickname ?? '');
