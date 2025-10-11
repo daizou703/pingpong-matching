@@ -5,6 +5,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 import { createClient, type Session, type User as SupaUser } from '@supabase/supabase-js';
+import type { AuthChangeEvent } from '@supabase/supabase-js';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -17,9 +18,14 @@ import { Slider } from '@/components/ui/slider';
 import { MessageSquare, Filter, MapPin, Star, Clock, ArrowLeft, CheckCircle2 } from 'lucide-react';
 
 // ---- Supabase Client（クライアント側） ----
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL as string;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY as string;
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL as string | undefined;
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY as string | undefined;
+if (!supabaseUrl || !supabaseAnonKey) {
+  console.error('Supabase env is missing: NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY');
+}
+export const supabase = createClient(supabaseUrl ?? '', supabaseAnonKey ?? '');
+// simple wrapper to align with code paths expecting getSupabase
+export function getSupabase() { return supabase; }
 
 // ---- Type definitions ----
 export type View = 'home' | 'detail' | 'proposal' | 'chat' | 'summary' | 'availability' | 'profile' | 'register';
@@ -106,46 +112,117 @@ export default function App() {
   const [loadingProfile, setLoadingProfile] = useState(false);
 
   useEffect(() => {
+    const sb = getSupabase();
+    if (!sb) return;
     (async () => {
-      const { data } = await supabase.auth.getSession();
+      const { data } = await sb.auth.getSession();
       setSession(data.session);
       setSupaUser(data.session?.user ?? null);
       if (data.session?.user) await ensureProfile(data.session.user);
     })();
-    const { data: sub } = supabase.auth.onAuthStateChange(async (_event, sess) => {
+
+    const { data: sub } = sb.auth.onAuthStateChange(async (_event, sess) => {
+      // セッションとユーザーを反映
       setSession(sess);
       setSupaUser(sess?.user ?? null);
-      if (sess?.user) await ensureProfile(sess.user);
-      setView((prev) => (sess?.user && prev === 'register' ? 'profile' : prev));
+
+      if (sess?.user) {
+        // プロフィールを用意（新規作成したかどうかを受け取る）
+        const created = await ensureProfile(sess.user);
+
+        // 「登録画面からのログイン」フラグ（LoginButtons で setItem 済みの想定）
+        const fromRegister =
+          typeof window !== 'undefined' ? window.localStorage.getItem('fromRegister') : null;
+
+        // --- ここを修正 ---
+        // 新規ユーザーは無条件でプロフィール編集へ
+        if (created) {
+          setView('profile');
+        } else if (fromRegister === '1' || view === 'register') {
+          // 既存ユーザーで登録画面経由はホームへ
+          setView('home');
+        }
+
+        // フラグを消す
+        if (fromRegister) {
+          try { window.localStorage.removeItem('fromRegister'); } catch {}
+        }
+      }
     });
+
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  async function ensureProfile(user: SupaUser) {
+  // Guard: すでにセッションがあるのに register に居続けないようにする（既存は home へ）
+  useEffect(() => {
+    if (session && view === 'register') setView('home');
+  }, [session, view]);
+
+  // --- robust logout (with fallback) ---
+  async function handleLogout() {
+    try {
+      const sb = getSupabase();
+      if (!sb) throw new Error('Supabase not initialized');
+      // Try global sign-out first (revokes refresh tokens on server)
+      const { error } = await sb.auth.signOut({ scope: 'global' as const });
+      if (error) {
+        console.warn('global signOut failed, fallback to local', error);
+        await sb.auth.signOut({ scope: 'local' as const });
+      }
+    } catch (e) {
+      console.error('signOut error', e);
+      // Hard fallback: purge local auth tokens (key format: sb-*-auth-token)
+      try {
+        if (typeof window !== 'undefined') {
+          Object.keys(window.localStorage)
+            .filter((k) => k.startsWith('sb-') && k.endsWith('-auth-token'))
+            .forEach((k) => window.localStorage.removeItem(k));
+        }
+      } catch {}
+    } finally {
+      setSession(null);
+      setSupaUser(null);
+      setProfile(null);
+      // Optional: ensure clean state (disabled)
+      // if (typeof window !== 'undefined') window.location.assign('/');
+    }
+  }
+
+  // もともとの ensureProfile をこの完全版で置き換え
+  async function ensureProfile(user: SupaUser): Promise<boolean> {
+    const sb = getSupabase();
+    if (!sb) return false;
     setLoadingProfile(true);
-    const { data, error } = await supabase
+    let created = false;
+
+    const { data: existing } = await sb
       .from('profiles')
       .select('user_id,nickname,level,area_code')
       .eq('user_id', user.id)
       .maybeSingle();
-    if (error) {
-      console.error('fetch profile error', error);
-      setLoadingProfile(false);
-      return;
-    }
-    if (!data) {
-      const { error: insErr } = await supabase.from('profiles').insert({
+
+    if (!existing) {
+      const seed = {
         user_id: user.id,
         nickname: user.email?.split('@')[0] ?? 'no-name',
         level: 3,
         area_code: 'yokohama',
-      });
-      if (insErr) console.error('insert profile error', insErr);
-      setProfile({ user_id: user.id, nickname: user.email?.split('@')[0] ?? 'no-name', level: 3, area_code: 'yokohama' });
+      };
+      const { data: up, error: upErr } = await sb
+        .from('profiles')
+        .upsert(seed, { onConflict: 'user_id' })
+        .select()
+        .maybeSingle();
+      if (!upErr) {
+        setProfile((up as ProfileRow) ?? (seed as ProfileRow));
+        created = true;
+      }
     } else {
-      setProfile(data as ProfileRow);
+      setProfile(existing as ProfileRow);
     }
+
     setLoadingProfile(false);
+    return created;
   }
 
   const sortedUsers = useMemo(() => SAMPLE_USERS.slice().sort((a, b) => b.rating - a.rating), []);
@@ -180,7 +257,7 @@ export default function App() {
           <div className="flex items-center gap-2">
             <Badge variant="secondary">{profile?.nickname ?? supaUser?.email}</Badge>
             <Button variant="secondary" onClick={() => setView('profile')}>プロフィール</Button>
-            <Button onClick={async () => { await supabase.auth.signOut(); setProfile(null); }}>ログアウト</Button>
+            <Button onClick={handleLogout}>ログアウト</Button>
           </div>
         )}
       </div>
@@ -246,6 +323,7 @@ function LoginButtons() {
         disabled={sending || !email}
         onClick={async () => {
           setSending(true);
+          window.localStorage?.setItem('fromRegister', '1');
           const { error } = await supabase.auth.signInWithOtp({ email, options: { emailRedirectTo: window.location.origin } });
           setSending(false);
           if (error) alert('送信失敗: ' + error.message);
@@ -257,6 +335,7 @@ function LoginButtons() {
       <Button
         variant="secondary"
         onClick={async () => {
+          window.localStorage?.setItem('fromRegister', '1');
           const { error } = await supabase.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: window.location.origin } });
           if (error) alert('Googleログイン失敗: ' + error.message);
         }}
@@ -405,7 +484,7 @@ function ChatView({ user, messages, input, setInput, onSend, onAgree }: { user: 
   return (
     <div className="max-w-2xl mx-auto p-4">
       <div className="text-sm opacity-70 mb-2">相手: {user.name}（{user.level}）</div>
-      <div className="border rounded-lg bg-white p-4 h-[360px] overflow-y-auto space-y-3">
+      <div className="border rounded-lg bg白 p-4 h-[360px] overflow-y-auto space-y-3">
         {messages.map((m, i) => (
           <div key={i} className={m.who === 'me' ? 'flex justify-end' : 'flex justify-start'}>
             <div className={m.who === 'me' ? 'rounded-2xl px-3 py-2 text-sm bg-gray-900 text-white' : 'rounded-2xl px-3 py-2 text-sm bg-gray-100'}>{m.text}</div>
@@ -705,7 +784,7 @@ function Availability({ onBack, supaUser }: { onBack: () => void; supaUser: Supa
                       </div>
                     </div>
                   ) : (
-                    <div className="flex items-center justify-between">
+                    <div className="flex items中心 justify-between">
                       <div className="text-sm">
                         <div>{fmt(s.start_at)} - {fmt(s.end_at)}</div>
                         <div className="opacity-70">エリア: {s.area_code ?? '-'}／会場: {s.venue_hint ?? '-'}</div>
