@@ -1,6 +1,10 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
+// page.tsx - cleaned v0.2.2
+// 重複import/型宣言なしのクリーン版。Vercelビルド対応。
+
+import React, { useEffect, useMemo, useState } from 'react';
+import { createClient, type Session, type User as SupaUser } from '@supabase/supabase-js';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -12,9 +16,15 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Slider } from '@/components/ui/slider';
 import { MessageSquare, Filter, MapPin, Star, Clock, ArrowLeft, CheckCircle2 } from 'lucide-react';
 
+// ---- Supabase Client（クライアント側） ----
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL as string;
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY as string;
+export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+
 // ---- Type definitions ----
-export type View = 'home' | 'detail' | 'proposal' | 'chat' | 'summary' | 'availability';
-export type User = {
+export type View = 'home' | 'detail' | 'proposal' | 'chat' | 'summary' | 'availability' | 'profile';
+export type Filters = { distance: number; levelDiff: number; times: string[]; prefs: string[] };
+export type UserRow = {
   id: string;
   name: string;
   level: string;
@@ -28,7 +38,14 @@ export type User = {
   intro: string;
 };
 
-const SAMPLE_USERS: User[] = [
+export type ProfileRow = {
+  user_id: string;
+  nickname: string | null;
+  level: number | null; // 1-6
+  area_code: string | null;
+};
+
+const SAMPLE_USERS: UserRow[] = [
   {
     id: 'u1',
     name: 'たろう',
@@ -38,7 +55,7 @@ const SAMPLE_USERS: User[] = [
     years: 5,
     prefs: ['多球', 'ゲーム'],
     distanceMinWalk: 12,
-    slot: '10/24 19:00–21:00',
+    slot: '10/24 19:00-21:00',
     area: '横浜駅±5km',
     intro: '○○区で週2練習しています。台確保はお任せください。',
   },
@@ -51,7 +68,7 @@ const SAMPLE_USERS: User[] = [
     years: 2,
     prefs: ['サーブ', '基礎'],
     distanceMinWalk: 8,
-    slot: '10/27 09:00–11:00',
+    slot: '10/27 09:00-11:00',
     area: '横浜駅±5km',
     intro: '基礎練多めでお願いします。',
   },
@@ -59,14 +76,61 @@ const SAMPLE_USERS: User[] = [
 
 export default function App() {
   const [view, setView] = useState<View>('home');
-  const [selected, setSelected] = useState<User>(SAMPLE_USERS[0]);
-  const [filters, setFilters] = useState({ distance: 5, levelDiff: 1, times: ['平日夜'], prefs: ['多球', 'ゲーム'] });
-  const [proposal, setProposal] = useState({ datetime: '10/24 19:00–21:00', place: '××卓球場 第2卓', memo: 'よろしくお願いします！' });
+  const [selected, setSelected] = useState<UserRow>(SAMPLE_USERS[0]);
+  const [filters, setFilters] = useState<Filters>({ distance: 5, levelDiff: 1, times: ['平日夜'], prefs: ['多球', 'ゲーム'] });
+  const [proposal, setProposal] = useState({ datetime: '10/24 19:00-21:00', place: '××卓球場 第2卓', memo: 'よろしくお願いします！' });
   const [messages, setMessages] = useState<{ who: 'me' | 'partner'; text: string }[]>([
-    { who: 'partner', text: '10/24 19:00–21:00 どうですか？' },
+    { who: 'partner', text: '10/24 19:00-21:00 どうですか？' },
     { who: 'me', text: 'OKです。会場は××卓球場で。' },
   ]);
   const [input, setInput] = useState('');
+
+  const [session, setSession] = useState<Session | null>(null);
+  const [supaUser, setSupaUser] = useState<SupaUser | null>(null);
+  const [profile, setProfile] = useState<ProfileRow | null>(null);
+  const [loadingProfile, setLoadingProfile] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase.auth.getSession();
+      setSession(data.session);
+      setSupaUser(data.session?.user ?? null);
+      if (data.session?.user) await ensureProfile(data.session.user);
+    })();
+    const { data: sub } = supabase.auth.onAuthStateChange(async (_event, sess) => {
+      setSession(sess);
+      setSupaUser(sess?.user ?? null);
+      if (sess?.user) await ensureProfile(sess.user);
+    });
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  async function ensureProfile(user: SupaUser) {
+    setLoadingProfile(true);
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('user_id,nickname,level,area_code')
+      .eq('user_id', user.id)
+      .maybeSingle();
+    if (error) {
+      console.error('fetch profile error', error);
+      setLoadingProfile(false);
+      return;
+    }
+    if (!data) {
+      const { error: insErr } = await supabase.from('profiles').insert({
+        user_id: user.id,
+        nickname: user.email?.split('@')[0] ?? 'no-name',
+        level: 3,
+        area_code: 'yokohama',
+      });
+      if (insErr) console.error('insert profile error', insErr);
+      setProfile({ user_id: user.id, nickname: user.email?.split('@')[0] ?? 'no-name', level: 3, area_code: 'yokohama' });
+    } else {
+      setProfile(data as ProfileRow);
+    }
+    setLoadingProfile(false);
+  }
 
   const sortedUsers = useMemo(() => SAMPLE_USERS.slice().sort((a, b) => b.rating - a.rating), []);
 
@@ -91,6 +155,15 @@ export default function App() {
         </Select>
         <FilterSheet filters={filters} setFilters={setFilters} />
         <Button variant="outline" onClick={() => setView('availability')}>可用時間</Button>
+        {!session ? (
+          <LoginButtons />
+        ) : (
+          <div className="flex items-center gap-2">
+            <Badge variant="secondary">{profile?.nickname ?? supaUser?.email}</Badge>
+            <Button variant="secondary" onClick={() => setView('profile')}>プロフィール</Button>
+            <Button onClick={async () => { await supabase.auth.signOut(); setProfile(null); }}>ログアウト</Button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -117,11 +190,64 @@ export default function App() {
       )}
       {view === 'summary' && <SummaryCard user={selected} proposal={proposal} onCalendar={() => alert('端末カレンダー登録のモック')} />}
       {view === 'availability' && <Availability onBack={() => setView('home')} />}
+      {view === 'profile' && (
+        <ProfileEditor
+          loading={loadingProfile}
+          profile={profile}
+          onSave={async (next) => {
+            if (!supaUser) return;
+            const { error } = await supabase.from('profiles').upsert({
+              user_id: supaUser.id,
+              nickname: next.nickname,
+              level: next.level,
+              area_code: next.area_code,
+            });
+            if (error) {
+              alert('保存に失敗しました: ' + error.message);
+            } else {
+              setProfile({ user_id: supaUser.id, ...next });
+              alert('保存しました');
+            }
+          }}
+          onCancel={() => setView('home')}
+        />
+      )}
     </div>
   );
 }
 
-function HomeList({ users, onOpen }: { users: User[]; onOpen: (u: User) => void }) {
+function LoginButtons() {
+  const [email, setEmail] = useState('');
+  const [sending, setSending] = useState(false);
+  return (
+    <div className="flex items-center gap-2">
+      <Input placeholder="メールでログイン（Magic Link）" value={email} onChange={(e) => setEmail(e.target.value)} className="w-[240px]" />
+      <Button
+        disabled={sending || !email}
+        onClick={async () => {
+          setSending(true);
+          const { error } = await supabase.auth.signInWithOtp({ email, options: { emailRedirectTo: window.location.origin } });
+          setSending(false);
+          if (error) alert('送信失敗: ' + error.message);
+          else alert('ログイン用リンクを送信しました。メールをご確認ください。');
+        }}
+      >
+        送信
+      </Button>
+      <Button
+        variant="secondary"
+        onClick={async () => {
+          const { error } = await supabase.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: window.location.origin } });
+          if (error) alert('Googleログイン失敗: ' + error.message);
+        }}
+      >
+        Googleでログイン
+      </Button>
+    </div>
+  );
+}
+
+function HomeList({ users, onOpen }: { users: UserRow[]; onOpen: (u: UserRow) => void }) {
   return (
     <div className="max-w-3xl mx-auto p-4">
       <Tabs defaultValue="recommend">
@@ -132,7 +258,7 @@ function HomeList({ users, onOpen }: { users: User[]; onOpen: (u: User) => void 
         </TabsList>
         <TabsContent value="recommend">
           <div className="grid gap-4 mt-4">
-            {users.map((u: User) => (
+            {users.map((u: UserRow) => (
               <Card key={u.id} className="shadow-sm">
                 <CardContent className="p-4">
                   <div className="flex items-start justify-between">
@@ -162,7 +288,7 @@ function HomeList({ users, onOpen }: { users: User[]; onOpen: (u: User) => void 
   );
 }
 
-function FilterSheet({ filters, setFilters }: any) {
+function FilterSheet({ filters, setFilters }: { filters: Filters; setFilters: React.Dispatch<React.SetStateAction<Filters>> }) {
   const practiceOptions = ['多球', 'サーブ', 'ゲーム', '基礎'];
   return (
     <Sheet>
@@ -220,7 +346,7 @@ function FilterSheet({ filters, setFilters }: any) {
   );
 }
 
-function ProfileDetail({ user, onPropose, onChat }: { user: User; onPropose: () => void; onChat: () => void }) {
+function ProfileDetail({ user, onPropose, onChat }: { user: UserRow; onPropose: () => void; onChat: () => void }) {
   return (
     <div className="max-w-2xl mx-auto p-4 space-y-4">
       <Card className="shadow-sm">
@@ -255,7 +381,7 @@ function ProfileDetail({ user, onPropose, onChat }: { user: User; onPropose: () 
   );
 }
 
-function ChatView({ user, messages, input, setInput, onSend, onAgree }: { user: User; messages: { who: 'me' | 'partner'; text: string }[]; input: string; setInput: (v: string) => void; onSend: () => void; onAgree: () => void }) {
+function ChatView({ user, messages, input, setInput, onSend, onAgree }: { user: UserRow; messages: { who: 'me' | 'partner'; text: string }[]; input: string; setInput: (v: string) => void; onSend: () => void; onAgree: () => void }) {
   return (
     <div className="max-w-2xl mx-auto p-4">
       <div className="text-sm opacity-70 mb-2">相手: {user.name}（{user.level}）</div>
@@ -298,7 +424,7 @@ function ProposalEditor({ proposal, setProposal, onSend }: { proposal: { datetim
   );
 }
 
-function SummaryCard({ user, proposal, onCalendar }: { user: User; proposal: { datetime: string; place: string; memo: string }; onCalendar: () => void }) {
+function SummaryCard({ user, proposal, onCalendar }: { user: UserRow; proposal: { datetime: string; place: string; memo: string }; onCalendar: () => void }) {
   return (
     <div className="max-w-xl mx-auto p-6">
       <Card className="shadow-sm">
@@ -325,21 +451,78 @@ function Availability({ onBack }: { onBack: () => void }) {
       <div className="space-y-2">
         <div className="text-sm">繰り返し</div>
         <div className="flex gap-2">
-          <Badge variant="secondary">水 19:00–21:00</Badge>
-          <Badge variant="secondary">土 09:00–12:00</Badge>
+          <Badge variant="secondary">水 19:00-21:00</Badge>
+          <Badge variant="secondary">土 09:00-12:00</Badge>
           <Button size="sm">追加</Button>
         </div>
       </div>
       <div className="space-y-2">
         <div className="text-sm">スポット</div>
         <div className="flex gap-2 flex-wrap">
-          <Badge>10/24 19:00–21:00 横浜駅周辺</Badge>
+          <Badge>10/24 19:00-21:00 横浜駅周辺</Badge>
           <Button size="sm">追加</Button>
         </div>
       </div>
       <div className="pt-2">
         <Button onClick={onBack}>保存</Button>
       </div>
+    </div>
+  );
+}
+
+function ProfileEditor({ loading, profile, onSave, onCancel }: { loading: boolean; profile: ProfileRow | null; onSave: (p: { nickname: string | null; level: number | null; area_code: string | null }) => void; onCancel: () => void }) {
+  const [nickname, setNickname] = useState(profile?.nickname ?? '');
+  const [level, setLevel] = useState<number>(profile?.level ?? 3);
+  const [area, setArea] = useState<string>(profile?.area_code ?? 'yokohama');
+
+  useEffect(() => {
+    setNickname(profile?.nickname ?? '');
+    setLevel(profile?.level ?? 3);
+    setArea(profile?.area_code ?? 'yokohama');
+  }, [profile]);
+
+  return (
+    <div className="max-w-xl mx-auto p-4 space-y-4">
+      <div className="text-lg font-semibold">プロフィール編集</div>
+      {loading ? (
+        <div>読み込み中…</div>
+      ) : (
+        <>
+          <div className="space-y-2">
+            <div className="text-sm">ニックネーム</div>
+            <Input value={nickname ?? ''} onChange={(e) => setNickname(e.target.value)} />
+          </div>
+          <div className="space-y-2">
+            <div className="text-sm">レベル（1 最弱 〜 6 最強）</div>
+            <Select value={String(level)} onValueChange={(v) => setLevel(Number(v))}>
+              <SelectTrigger className="w-[160px]"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="1">1</SelectItem>
+                <SelectItem value="2">2</SelectItem>
+                <SelectItem value="3">3</SelectItem>
+                <SelectItem value="4">4</SelectItem>
+                <SelectItem value="5">5</SelectItem>
+                <SelectItem value="6">6</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-2">
+            <div className="text-sm">活動エリア</div>
+            <Select value={area} onValueChange={(v) => setArea(v)}>
+              <SelectTrigger className="w-[200px]"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="yokohama">横浜駅±5km</SelectItem>
+                <SelectItem value="shinagawa">品川駅±5km</SelectItem>
+                <SelectItem value="tokyo">東京駅±5km</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex gap-2 pt-2">
+            <Button onClick={() => onSave({ nickname, level, area_code: area })}>保存</Button>
+            <Button variant="secondary" onClick={onCancel}>キャンセル</Button>
+          </div>
+        </>
+      )}
     </div>
   );
 }
