@@ -460,13 +460,19 @@ function Availability({ onBack, supaUser }: { onBack: () => void; supaUser: Supa
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  // フォーム
+  // 追加/編集フォーム用のローカル状態
   const [start, setStart] = useState<string>(''); // datetime-local
   const [end, setEnd] = useState<string>('');
   const [area, setArea] = useState<string>('yokohama');
   const [venue, setVenue] = useState<string>('');
 
-  // 読み込み
+  // 編集行の管理
+  const [editId, setEditId] = useState<number | null>(null);
+  const [editStart, setEditStart] = useState<string>('');
+  const [editEnd, setEditEnd] = useState<string>('');
+  const [editArea, setEditArea] = useState<string>('yokohama');
+  const [editVenue, setEditVenue] = useState<string>('');
+
   useEffect(() => {
     if (!supaUser) return;
     (async () => {
@@ -482,7 +488,7 @@ function Availability({ onBack, supaUser }: { onBack: () => void; supaUser: Supa
     })();
   }, [supaUser]);
 
-  // 表示用フォーマッタ
+  // 表示用
   function fmt(dt: string) {
     if (!dt) return '';
     const d = new Date(dt);
@@ -493,8 +499,18 @@ function Availability({ onBack, supaUser }: { onBack: () => void; supaUser: Supa
     const mm = String(d.getMinutes()).padStart(2, '0');
     return `${y}/${m}/${dd} ${hh}:${mm}`;
   }
+  // ISO -> input(datetime-local)
+  function toInput(dt: string) {
+    if (!dt) return '';
+    const d = new Date(dt);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    return `${y}-${m}-${dd}T${hh}:${mm}`;
+  }
 
-  // 追加
   async function addSlot() {
     if (!supaUser) { alert('ログインしてください'); return; }
     if (!start || !end) { alert('開始/終了を入力してください'); return; }
@@ -521,7 +537,6 @@ function Availability({ onBack, supaUser }: { onBack: () => void; supaUser: Supa
     setStart(''); setEnd(''); setVenue('');
   }
 
-  // 削除
   async function removeSlot(id: number) {
     if (!confirm('このスロットを削除しますか？')) return;
     const { error } = await supabase.from('availability_slots').delete().eq('id', id);
@@ -529,7 +544,44 @@ function Availability({ onBack, supaUser }: { onBack: () => void; supaUser: Supa
     setSlots(slots.filter(s => s.id !== id));
   }
 
-  // 未ログイン表示
+  function beginEdit(s: SlotRow) {
+    setEditId(s.id);
+    setEditStart(toInput(s.start_at));
+    setEditEnd(toInput(s.end_at));
+    setEditArea(s.area_code ?? 'yokohama');
+    setEditVenue(s.venue_hint ?? '');
+  }
+  function cancelEdit() {
+    setEditId(null);
+    setEditStart('');
+    setEditEnd('');
+    setEditArea('yokohama');
+    setEditVenue('');
+  }
+  async function saveEdit() {
+    if (!supaUser || editId === null) return;
+    if (!editStart || !editEnd) { alert('開始/終了を入力してください'); return; }
+    const startIso = new Date(editStart).toISOString();
+    const endIso = new Date(editEnd).toISOString();
+    if (new Date(endIso) <= new Date(startIso)) { alert('終了は開始より後にしてください'); return; }
+
+    setSaving(true);
+    const { error } = await supabase
+      .from('availability_slots')
+      .update({
+        start_at: startIso,
+        end_at: endIso,
+        area_code: editArea,
+        venue_hint: editVenue || null,
+      })
+      .eq('id', editId);
+    setSaving(false);
+
+    if (error) { alert('更新に失敗: ' + error.message); return; }
+    setSlots(slots.map(s => s.id === editId ? { ...s, start_at: startIso, end_at: endIso, area_code: editArea, venue_hint: editVenue || null } : s));
+    cancelEdit();
+  }
+
   if (!supaUser) {
     return (
       <div className="max-w-xl mx-auto p-4 space-y-4">
@@ -579,7 +631,7 @@ function Availability({ onBack, supaUser }: { onBack: () => void; supaUser: Supa
         </CardContent>
       </Card>
 
-      {/* 一覧 */}
+      {/* 一覧＋編集 */}
       <Card className="shadow-sm">
         <CardContent className="p-4">
           <div className="text-sm font-medium mb-2">登録済みスロット</div>
@@ -590,15 +642,50 @@ function Availability({ onBack, supaUser }: { onBack: () => void; supaUser: Supa
           ) : (
             <div className="space-y-2">
               {slots.map((s) => (
-                <div key={s.id} className="flex items-center justify-between border rounded-lg p-2 bg-white">
-                  <div className="text-sm">
-                    <div>{fmt(s.start_at)} - {fmt(s.end_at)}</div>
-                    <div className="opacity-70">エリア: {s.area_code ?? '-'}／会場: {s.venue_hint ?? '-'}</div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Badge variant="secondary">ID {s.id}</Badge>
-                    <Button variant="secondary" onClick={() => removeSlot(s.id)}>削除</Button>
-                  </div>
+                <div key={s.id} className="border rounded-lg p-2 bg-white">
+                  {editId === s.id ? (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-end">
+                      <div>
+                        <div className="text-xs mb-1">開始</div>
+                        <Input type="datetime-local" value={editStart} onChange={(e) => setEditStart(e.target.value)} />
+                      </div>
+                      <div>
+                        <div className="text-xs mb-1">終了</div>
+                        <Input type="datetime-local" value={editEnd} onChange={(e) => setEditEnd(e.target.value)} />
+                      </div>
+                      <div>
+                        <div className="text-xs mb-1">エリア</div>
+                        <Select value={editArea} onValueChange={(v) => setEditArea(v)}>
+                          <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="yokohama">横浜駅±5km</SelectItem>
+                            <SelectItem value="shinagawa">品川駅±5km</SelectItem>
+                            <SelectItem value="tokyo">東京駅±5km</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div>
+                        <div className="text-xs mb-1">会場メモ</div>
+                        <Input value={editVenue} onChange={(e) => setEditVenue(e.target.value)} />
+                      </div>
+                      <div className="flex gap-2">
+                        <Button onClick={saveEdit} disabled={saving}>保存</Button>
+                        <Button variant="secondary" onClick={cancelEdit}>キャンセル</Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-between">
+                      <div className="text-sm">
+                        <div>{fmt(s.start_at)} - {fmt(s.end_at)}</div>
+                        <div className="opacity-70">エリア: {s.area_code ?? '-'}／会場: {s.venue_hint ?? '-'}</div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Badge variant="secondary">ID {s.id}</Badge>
+                        <Button variant="secondary" onClick={() => beginEdit(s)}>編集</Button>
+                        <Button variant="secondary" onClick={() => removeSlot(s.id)}>削除</Button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -612,7 +699,6 @@ function Availability({ onBack, supaUser }: { onBack: () => void; supaUser: Supa
     </div>
   );
 }
-
 
 function ProfileEditor({ loading, profile, onSave, onCancel }: { loading: boolean; profile: ProfileRow | null; onSave: (p: { nickname: string | null; level: number | null; area_code: string | null }) => void; onCancel: () => void }) {
   const [nickname, setNickname] = useState(profile?.nickname ?? '');
