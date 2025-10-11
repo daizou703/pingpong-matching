@@ -48,13 +48,17 @@ export type ProfileRow = {
 export type SlotRow = {
   id: number;
   user_id: string;
-  start_at: string; // ISO string
+  start_at: string; // ISO string（次回発生日などの基準）
   end_at: string;   // ISO string
   area_code: string | null;
   venue_hint: string | null;
   is_recurring: boolean | null;
+  recur_dow?: number | null;     // 0=Sun ... 6=Sat
+  recur_start?: string | null;   // 'HH:MM'
+  recur_end?: string | null;     // 'HH:MM'
   created_at?: string;
 };
+
 
 const SAMPLE_USERS: UserRow[] = [
   {
@@ -460,18 +464,26 @@ function Availability({ onBack, supaUser }: { onBack: () => void; supaUser: Supa
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  // 追加/編集フォーム用のローカル状態
+  // 単発スロット 追加フォーム
   const [start, setStart] = useState<string>(''); // datetime-local
   const [end, setEnd] = useState<string>('');
   const [area, setArea] = useState<string>('yokohama');
   const [venue, setVenue] = useState<string>('');
 
-  // 編集行の管理
+  // 定期スロット 追加フォーム
+  const [rcDow, setRcDow] = useState<number>(3); // 水
+  const [rcStart, setRcStart] = useState<string>('19:00');
+  const [rcEnd, setRcEnd] = useState<string>('21:00');
+
+  // 編集行の管理（単発/定期共通）
   const [editId, setEditId] = useState<number | null>(null);
-  const [editStart, setEditStart] = useState<string>('');
-  const [editEnd, setEditEnd] = useState<string>('');
+  const [editStartDT, setEditStartDT] = useState<string>('');   // 単発: datetime-local
+  const [editEndDT, setEditEndDT] = useState<string>('');
   const [editArea, setEditArea] = useState<string>('yokohama');
   const [editVenue, setEditVenue] = useState<string>('');
+  const [editDow, setEditDow] = useState<number>(3);            // 定期: weekday
+  const [editStartT, setEditStartT] = useState<string>('19:00'); // 定期: HH:MM
+  const [editEndT, setEditEndT] = useState<string>('21:00');
 
   useEffect(() => {
     if (!supaUser) return;
@@ -479,16 +491,17 @@ function Availability({ onBack, supaUser }: { onBack: () => void; supaUser: Supa
       setLoading(true);
       const { data, error } = await supabase
         .from('availability_slots')
-        .select('id,user_id,start_at,end_at,area_code,venue_hint,is_recurring,created_at')
+        .select('id,user_id,start_at,end_at,area_code,venue_hint,is_recurring,recur_dow,recur_start,recur_end,created_at')
         .eq('user_id', supaUser.id)
         .order('start_at', { ascending: true });
+
       if (error) console.error('load slots error', error);
       setSlots((data ?? []) as SlotRow[]);
       setLoading(false);
     })();
   }, [supaUser]);
 
-  // 表示用
+  // ユーティリティ
   function fmt(dt: string) {
     if (!dt) return '';
     const d = new Date(dt);
@@ -499,7 +512,6 @@ function Availability({ onBack, supaUser }: { onBack: () => void; supaUser: Supa
     const mm = String(d.getMinutes()).padStart(2, '0');
     return `${y}/${m}/${dd} ${hh}:${mm}`;
   }
-  // ISO -> input(datetime-local)
   function toInput(dt: string) {
     if (!dt) return '';
     const d = new Date(dt);
@@ -510,7 +522,23 @@ function Availability({ onBack, supaUser }: { onBack: () => void; supaUser: Supa
     const mm = String(d.getMinutes()).padStart(2, '0');
     return `${y}-${m}-${dd}T${hh}:${mm}`;
   }
+  function nextDateForDow(targetDow: number): Date {
+    const now = new Date();
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const currentDow = d.getDay();
+    let add = targetDow - currentDow;
+    if (add < 0) add += 7;
+    d.setDate(d.getDate() + add);
+    return d;
+  }
+  function combineDateTime(date: Date, hhmm: string): Date {
+    const [hh, mm] = hhmm.split(':').map((x) => parseInt(x, 10));
+    const out = new Date(date);
+    out.setHours(hh ?? 0, mm ?? 0, 0, 0);
+    return out;
+  }
 
+  // 単発 追加
   async function addSlot() {
     if (!supaUser) { alert('ログインしてください'); return; }
     if (!start || !end) { alert('開始/終了を入力してください'); return; }
@@ -537,6 +565,37 @@ function Availability({ onBack, supaUser }: { onBack: () => void; supaUser: Supa
     setStart(''); setEnd(''); setVenue('');
   }
 
+  // 定期 追加（基準日=start_at/end_atに「次のその曜日の日付」を入れる）
+  async function addRecurring() {
+    if (!supaUser) { alert('ログインしてください'); return; }
+    if (!rcStart || !rcEnd) { alert('開始/終了を入力してください'); return; }
+    const base = nextDateForDow(rcDow);
+    const sdt = combineDateTime(base, rcStart);
+    const edt = combineDateTime(base, rcEnd);
+    if (edt <= sdt) { alert('終了は開始より後にしてください'); return; }
+
+    setSaving(true);
+    const { data, error } = await supabase
+      .from('availability_slots')
+      .insert({
+        user_id: supaUser.id,
+        start_at: sdt.toISOString(),
+        end_at: edt.toISOString(),
+        area_code: area,
+        venue_hint: venue || null,
+        is_recurring: true,
+        recur_dow: rcDow,
+        recur_start: rcStart,
+        recur_end: rcEnd,
+      })
+      .select();
+    setSaving(false);
+
+    if (error) { alert('追加に失敗: ' + error.message); return; }
+    setSlots([...(slots ?? []), ...(data as SlotRow[])]);
+  }
+
+  // 削除
   async function removeSlot(id: number) {
     if (!confirm('このスロットを削除しますか？')) return;
     const { error } = await supabase.from('availability_slots').delete().eq('id', id);
@@ -544,42 +603,94 @@ function Availability({ onBack, supaUser }: { onBack: () => void; supaUser: Supa
     setSlots(slots.filter(s => s.id !== id));
   }
 
+  // 編集開始
   function beginEdit(s: SlotRow) {
     setEditId(s.id);
-    setEditStart(toInput(s.start_at));
-    setEditEnd(toInput(s.end_at));
     setEditArea(s.area_code ?? 'yokohama');
     setEditVenue(s.venue_hint ?? '');
+
+    if (s.is_recurring) {
+      setEditDow(s.recur_dow ?? 3);
+      setEditStartT(s.recur_start ?? '19:00');
+      setEditEndT(s.recur_end ?? '21:00');
+      // 表示には単発のdatetimeを使わない
+      setEditStartDT('');
+      setEditEndDT('');
+    } else {
+      setEditStartDT(toInput(s.start_at));
+      setEditEndDT(toInput(s.end_at));
+      setEditDow(3);
+      setEditStartT('19:00');
+      setEditEndT('21:00');
+    }
   }
   function cancelEdit() {
     setEditId(null);
-    setEditStart('');
-    setEditEnd('');
+    setEditStartDT('');
+    setEditEndDT('');
     setEditArea('yokohama');
     setEditVenue('');
+    setEditDow(3);
+    setEditStartT('19:00');
+    setEditEndT('21:00');
   }
-  async function saveEdit() {
+
+  // 保存（単発/定期を自動判別）
+  async function saveEdit(target: SlotRow) {
     if (!supaUser || editId === null) return;
-    if (!editStart || !editEnd) { alert('開始/終了を入力してください'); return; }
-    const startIso = new Date(editStart).toISOString();
-    const endIso = new Date(editEnd).toISOString();
-    if (new Date(endIso) <= new Date(startIso)) { alert('終了は開始より後にしてください'); return; }
 
-    setSaving(true);
-    const { error } = await supabase
-      .from('availability_slots')
-      .update({
-        start_at: startIso,
-        end_at: endIso,
-        area_code: editArea,
-        venue_hint: editVenue || null,
-      })
-      .eq('id', editId);
-    setSaving(false);
+    if (target.is_recurring) {
+      if (!editStartT || !editEndT) { alert('開始/終了を入力してください'); return; }
+      const base = nextDateForDow(editDow);
+      const sdt = combineDateTime(base, editStartT);
+      const edt = combineDateTime(base, editEndT);
+      if (edt <= sdt) { alert('終了は開始より後にしてください'); return; }
 
-    if (error) { alert('更新に失敗: ' + error.message); return; }
-    setSlots(slots.map(s => s.id === editId ? { ...s, start_at: startIso, end_at: endIso, area_code: editArea, venue_hint: editVenue || null } : s));
-    cancelEdit();
+      setSaving(true);
+      const { error } = await supabase
+        .from('availability_slots')
+        .update({
+          start_at: sdt.toISOString(),
+          end_at: edt.toISOString(),
+          area_code: editArea,
+          venue_hint: editVenue || null,
+          recur_dow: editDow,
+          recur_start: editStartT,
+          recur_end: editEndT,
+        })
+        .eq('id', editId);
+      setSaving(false);
+
+      if (error) { alert('更新に失敗: ' + error.message); return; }
+      setSlots(slots.map(s => s.id === editId
+        ? { ...s, start_at: sdt.toISOString(), end_at: edt.toISOString(), area_code: editArea, venue_hint: editVenue || null, recur_dow: editDow, recur_start: editStartT, recur_end: editEndT }
+        : s));
+      cancelEdit();
+
+    } else {
+      if (!editStartDT || !editEndDT) { alert('開始/終了を入力してください'); return; }
+      const sdt = new Date(editStartDT);
+      const edt = new Date(editEndDT);
+      if (edt <= sdt) { alert('終了は開始より後にしてください'); return; }
+
+      setSaving(true);
+      const { error } = await supabase
+        .from('availability_slots')
+        .update({
+          start_at: sdt.toISOString(),
+          end_at: edt.toISOString(),
+          area_code: editArea,
+          venue_hint: editVenue || null,
+        })
+        .eq('id', editId);
+      setSaving(false);
+
+      if (error) { alert('更新に失敗: ' + error.message); return; }
+      setSlots(slots.map(s => s.id === editId
+        ? { ...s, start_at: sdt.toISOString(), end_at: edt.toISOString(), area_code: editArea, venue_hint: editVenue || null }
+        : s));
+      cancelEdit();
+    }
   }
 
   if (!supaUser) {
@@ -592,14 +703,17 @@ function Availability({ onBack, supaUser }: { onBack: () => void; supaUser: Supa
     );
   }
 
+  const recurring = slots.filter(s => !!s.is_recurring);
+  const singles = slots.filter(s => !s.is_recurring);
+
   return (
     <div className="max-w-xl mx-auto p-4 space-y-4">
       <div className="text-lg font-semibold">可用時間</div>
 
-      {/* 追加フォーム */}
+      {/* 単発 追加 */}
       <Card className="shadow-sm">
         <CardContent className="p-4 space-y-3">
-          <div className="text-sm font-medium">スロットを追加</div>
+          <div className="text-sm font-medium">スロットを追加（単発）</div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div>
               <div className="text-xs mb-1">開始</div>
@@ -631,64 +745,189 @@ function Availability({ onBack, supaUser }: { onBack: () => void; supaUser: Supa
         </CardContent>
       </Card>
 
-      {/* 一覧＋編集 */}
+      {/* 定期 追加 */}
       <Card className="shadow-sm">
-        <CardContent className="p-4">
-          <div className="text-sm font-medium mb-2">登録済みスロット</div>
-          {loading ? (
-            <div>読み込み中...</div>
-          ) : slots.length === 0 ? (
-            <div className="text-sm opacity-70">まだ登録がありません</div>
-          ) : (
-            <div className="space-y-2">
-              {slots.map((s) => (
-                <div key={s.id} className="border rounded-lg p-2 bg-white">
-                  {editId === s.id ? (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-end">
-                      <div>
-                        <div className="text-xs mb-1">開始</div>
-                        <Input type="datetime-local" value={editStart} onChange={(e) => setEditStart(e.target.value)} />
-                      </div>
-                      <div>
-                        <div className="text-xs mb-1">終了</div>
-                        <Input type="datetime-local" value={editEnd} onChange={(e) => setEditEnd(e.target.value)} />
-                      </div>
-                      <div>
-                        <div className="text-xs mb-1">エリア</div>
-                        <Select value={editArea} onValueChange={(v) => setEditArea(v)}>
-                          <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="yokohama">横浜駅±5km</SelectItem>
-                            <SelectItem value="shinagawa">品川駅±5km</SelectItem>
-                            <SelectItem value="tokyo">東京駅±5km</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <div>
-                        <div className="text-xs mb-1">会場メモ</div>
-                        <Input value={editVenue} onChange={(e) => setEditVenue(e.target.value)} />
-                      </div>
-                      <div className="flex gap-2">
-                        <Button onClick={saveEdit} disabled={saving}>保存</Button>
-                        <Button variant="secondary" onClick={cancelEdit}>キャンセル</Button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="flex items-center justify-between">
-                      <div className="text-sm">
-                        <div>{fmt(s.start_at)} - {fmt(s.end_at)}</div>
-                        <div className="opacity-70">エリア: {s.area_code ?? '-'}／会場: {s.venue_hint ?? '-'}</div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Badge variant="secondary">ID {s.id}</Badge>
-                        <Button variant="secondary" onClick={() => beginEdit(s)}>編集</Button>
-                        <Button variant="secondary" onClick={() => removeSlot(s.id)}>削除</Button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ))}
+        <CardContent className="p-4 space-y-3">
+          <div className="text-sm font-medium">毎週の定期枠を追加</div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+            <div>
+              <div className="text-xs mb-1">曜日</div>
+              <Select value={String(rcDow)} onValueChange={(v) => setRcDow(Number(v))}>
+                <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="0">日</SelectItem>
+                  <SelectItem value="1">月</SelectItem>
+                  <SelectItem value="2">火</SelectItem>
+                  <SelectItem value="3">水</SelectItem>
+                  <SelectItem value="4">木</SelectItem>
+                  <SelectItem value="5">金</SelectItem>
+                  <SelectItem value="6">土</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
+            <div>
+              <div className="text-xs mb-1">開始時刻</div>
+              <Input type="time" value={rcStart} onChange={(e) => setRcStart(e.target.value)} />
+            </div>
+            <div>
+              <div className="text-xs mb-1">終了時刻</div>
+              <Input type="time" value={rcEnd} onChange={(e) => setRcEnd(e.target.value)} />
+            </div>
+            <div>
+              <div className="text-xs mb-1">エリア</div>
+              <Select value={area} onValueChange={(v) => setArea(v)}>
+                <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="yokohama">横浜駅±5km</SelectItem>
+                  <SelectItem value="shinagawa">品川駅±5km</SelectItem>
+                  <SelectItem value="tokyo">東京駅±5km</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="md:col-span-2">
+              <div className="text-xs mb-1">会場メモ</div>
+              <Input placeholder="○○卓球場 第2卓 など" value={venue} onChange={(e) => setVenue(e.target.value)} />
+            </div>
+          </div>
+          <div className="pt-1">
+            <Button onClick={addRecurring} disabled={saving}>追加</Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* 一覧（定期 / 単発） */}
+      <Card className="shadow-sm">
+        <CardContent className="p-4 space-y-4">
+          <div className="text-sm font-medium">登録済みスロット</div>
+
+          {loading ? <div>読み込み中...</div> : (
+            <>
+              {/* 定期 */}
+              <div className="space-y-2">
+                <div className="text-xs opacity-70">毎週の定期枠</div>
+                {recurring.length === 0 ? (
+                  <div className="text-sm opacity-70">登録がありません</div>
+                ) : recurring.map((s) => (
+                  <div key={s.id} className="border rounded-lg p-2 bg-white">
+                    {editId === s.id ? (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-end">
+                        <div>
+                          <div className="text-xs mb-1">曜日</div>
+                          <Select value={String(editDow)} onValueChange={(v) => setEditDow(Number(v))}>
+                            <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="0">日</SelectItem>
+                              <SelectItem value="1">月</SelectItem>
+                              <SelectItem value="2">火</SelectItem>
+                              <SelectItem value="3">水</SelectItem>
+                              <SelectItem value="4">木</SelectItem>
+                              <SelectItem value="5">金</SelectItem>
+                              <SelectItem value="6">土</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div>
+                          <div className="text-xs mb-1">開始時刻</div>
+                          <Input type="time" value={editStartT} onChange={(e) => setEditStartT(e.target.value)} />
+                        </div>
+                        <div>
+                          <div className="text-xs mb-1">終了時刻</div>
+                          <Input type="time" value={editEndT} onChange={(e) => setEditEndT(e.target.value)} />
+                        </div>
+                        <div>
+                          <div className="text-xs mb-1">エリア</div>
+                          <Select value={editArea} onValueChange={(v) => setEditArea(v)}>
+                            <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="yokohama">横浜駅±5km</SelectItem>
+                              <SelectItem value="shinagawa">品川駅±5km</SelectItem>
+                              <SelectItem value="tokyo">東京駅±5km</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div>
+                          <div className="text-xs mb-1">会場メモ</div>
+                          <Input value={editVenue} onChange={(e) => setEditVenue(e.target.value)} />
+                        </div>
+                        <div className="flex gap-2">
+                          <Button onClick={() => saveEdit(s)} disabled={saving}>保存</Button>
+                          <Button variant="secondary" onClick={cancelEdit}>キャンセル</Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-between">
+                        <div className="text-sm">
+                          <div>
+                            毎週{['日','月','火','水','木','金','土'][s.recur_dow ?? 0]} {s.recur_start ?? ''} - {s.recur_end ?? ''}
+                            <span className="opacity-70">（基準日: {fmt(s.start_at)}）</span>
+                          </div>
+                          <div className="opacity-70">エリア: {s.area_code ?? '-'}／会場: {s.venue_hint ?? '-'}</div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Badge variant="secondary">ID {s.id}</Badge>
+                          <Button variant="secondary" onClick={() => beginEdit(s)}>編集</Button>
+                          <Button variant="secondary" onClick={() => removeSlot(s.id)}>削除</Button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              {/* 単発 */}
+              <div className="space-y-2 pt-2">
+                <div className="text-xs opacity-70">単発枠</div>
+                {singles.length === 0 ? (
+                  <div className="text-sm opacity-70">登録がありません</div>
+                ) : singles.map((s) => (
+                  <div key={s.id} className="border rounded-lg p-2 bg-white">
+                    {editId === s.id ? (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-end">
+                        <div>
+                          <div className="text-xs mb-1">開始</div>
+                          <Input type="datetime-local" value={editStartDT} onChange={(e) => setEditStartDT(e.target.value)} />
+                        </div>
+                        <div>
+                          <div className="text-xs mb-1">終了</div>
+                          <Input type="datetime-local" value={editEndDT} onChange={(e) => setEditEndDT(e.target.value)} />
+                        </div>
+                        <div>
+                          <div className="text-xs mb-1">エリア</div>
+                          <Select value={editArea} onValueChange={(v) => setEditArea(v)}>
+                            <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="yokohama">横浜駅±5km</SelectItem>
+                              <SelectItem value="shinagawa">品川駅±5km</SelectItem>
+                              <SelectItem value="tokyo">東京駅±5km</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div>
+                          <div className="text-xs mb-1">会場メモ</div>
+                          <Input value={editVenue} onChange={(e) => setEditVenue(e.target.value)} />
+                        </div>
+                        <div className="flex gap-2">
+                          <Button onClick={() => saveEdit(s)} disabled={saving}>保存</Button>
+                          <Button variant="secondary" onClick={cancelEdit}>キャンセル</Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-between">
+                        <div className="text-sm">
+                          <div>{fmt(s.start_at)} - {fmt(s.end_at)}</div>
+                          <div className="opacity-70">エリア: {s.area_code ?? '-'}／会場: {s.venue_hint ?? '-'}</div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Badge variant="secondary">ID {s.id}</Badge>
+                          <Button variant="secondary" onClick={() => beginEdit(s)}>編集</Button>
+                          <Button variant="secondary" onClick={() => removeSlot(s.id)}>削除</Button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </>
           )}
         </CardContent>
       </Card>
@@ -699,6 +938,7 @@ function Availability({ onBack, supaUser }: { onBack: () => void; supaUser: Supa
     </div>
   );
 }
+
 
 function ProfileEditor({ loading, profile, onSave, onCancel }: { loading: boolean; profile: ProfileRow | null; onSave: (p: { nickname: string | null; level: number | null; area_code: string | null }) => void; onCancel: () => void }) {
   const [nickname, setNickname] = useState(profile?.nickname ?? '');
