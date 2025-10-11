@@ -1,8 +1,6 @@
 'use client';
 
-// page.tsx - cleaned v0.2.2
-// 重複import/型宣言なしのクリーン版。Vercelビルド対応。
-
+// page.tsx - cleaned v0.3.0 (profile fields expanded, types fixed)
 import React, { useEffect, useMemo, useState } from 'react';
 import { createClient, type Session, type User as SupaUser } from '@supabase/supabase-js';
 import type { AuthChangeEvent } from '@supabase/supabase-js';
@@ -44,11 +42,17 @@ export type UserRow = {
   intro: string;
 };
 
+// プロフィール（拡張版）
 export type ProfileRow = {
   user_id: string;
   nickname: string | null;
   level: number | null; // 1-6
   area_code: string | null;
+  gender: 'male' | 'female' | 'other' | null;
+  hand: 'right' | 'left' | null;
+  play_style: string | null;
+  bio: string | null;
+  avatar_url: string | null;
 };
 
 // 可用時間スロットの型（編集/一覧で使用）
@@ -120,42 +124,34 @@ export default function App() {
       setSupaUser(data.session?.user ?? null);
       if (data.session?.user) await ensureProfile(data.session.user);
     })();
-
-    const { data: sub } = sb.auth.onAuthStateChange(async (_event, sess) => {
-      // セッションとユーザーを反映
+    const { data: sub } = sb.auth.onAuthStateChange(async (_event: AuthChangeEvent, sess: Session | null) => {
       setSession(sess);
       setSupaUser(sess?.user ?? null);
 
       if (sess?.user) {
-        // プロフィールを用意（新規作成したかどうかを受け取る）
         const created = await ensureProfile(sess.user);
+        const fromRegister = typeof window !== 'undefined'
+          ? window.localStorage.getItem('fromRegister')
+          : null;
 
-        // 「登録画面からのログイン」フラグ（LoginButtons で setItem 済みの想定）
-        const fromRegister =
-          typeof window !== 'undefined' ? window.localStorage.getItem('fromRegister') : null;
-
-        // --- ここを修正 ---
-        // 新規ユーザーは無条件でプロフィール編集へ
+        // 新規ユーザーは必ずプロフィール編集へ、既存ユーザーの登録画面経由はホームへ
         if (created) {
           setView('profile');
         } else if (fromRegister === '1' || view === 'register') {
-          // 既存ユーザーで登録画面経由はホームへ
           setView('home');
         }
 
-        // フラグを消す
         if (fromRegister) {
           try { window.localStorage.removeItem('fromRegister'); } catch {}
         }
       }
     });
-
     return () => sub.subscription.unsubscribe();
-  }, []);
+  }, [view]);
 
-  // Guard: すでにセッションがあるのに register に居続けないようにする（既存は home へ）
+  // Guard: すでにセッションがあるのに register に居続けないようにする
   useEffect(() => {
-    if (session && view === 'register') setView('home');
+    if (session && view === 'register') setView('profile');
   }, [session, view]);
 
   // --- robust logout (with fallback) ---
@@ -183,12 +179,10 @@ export default function App() {
       setSession(null);
       setSupaUser(null);
       setProfile(null);
-      // Optional: ensure clean state (disabled)
-      // if (typeof window !== 'undefined') window.location.assign('/');
     }
   }
 
-  // もともとの ensureProfile をこの完全版で置き換え
+  // 既存の ensureProfile を拡張
   async function ensureProfile(user: SupaUser): Promise<boolean> {
     const sb = getSupabase();
     if (!sb) return false;
@@ -197,16 +191,21 @@ export default function App() {
 
     const { data: existing } = await sb
       .from('profiles')
-      .select('user_id,nickname,level,area_code')
+      .select('user_id,nickname,level,area_code,gender,hand,play_style,bio,avatar_url')
       .eq('user_id', user.id)
       .maybeSingle();
 
     if (!existing) {
-      const seed = {
+      const seed: ProfileRow = {
         user_id: user.id,
         nickname: user.email?.split('@')[0] ?? 'no-name',
         level: 3,
         area_code: 'yokohama',
+        gender: null,
+        hand: null,
+        play_style: null,
+        bio: null,
+        avatar_url: null,
       };
       const { data: up, error: upErr } = await sb
         .from('profiles')
@@ -214,7 +213,7 @@ export default function App() {
         .select()
         .maybeSingle();
       if (!upErr) {
-        setProfile((up as ProfileRow) ?? (seed as ProfileRow));
+        setProfile((up as ProfileRow) ?? seed);
         created = true;
       }
     } else {
@@ -298,12 +297,18 @@ export default function App() {
               nickname: next.nickname,
               level: next.level,
               area_code: next.area_code,
+              gender: next.gender,
+              hand: next.hand,
+              play_style: next.play_style,
+              bio: next.bio,
+              avatar_url: next.avatar_url,
             });
             if (error) {
               alert('保存に失敗しました: ' + error.message);
             } else {
               setProfile({ user_id: supaUser.id, ...next });
               alert('保存しました');
+              setView('home');
             }
           }}
           onCancel={() => setView('home')}
@@ -484,7 +489,7 @@ function ChatView({ user, messages, input, setInput, onSend, onAgree }: { user: 
   return (
     <div className="max-w-2xl mx-auto p-4">
       <div className="text-sm opacity-70 mb-2">相手: {user.name}（{user.level}）</div>
-      <div className="border rounded-lg bg白 p-4 h-[360px] overflow-y-auto space-y-3">
+      <div className="border rounded-lg bg-white p-4 h-[360px] overflow-y-auto space-y-3">
         {messages.map((m, i) => (
           <div key={i} className={m.who === 'me' ? 'flex justify-end' : 'flex justify-start'}>
             <div className={m.who === 'me' ? 'rounded-2xl px-3 py-2 text-sm bg-gray-900 text-white' : 'rounded-2xl px-3 py-2 text-sm bg-gray-100'}>{m.text}</div>
@@ -784,7 +789,7 @@ function Availability({ onBack, supaUser }: { onBack: () => void; supaUser: Supa
                       </div>
                     </div>
                   ) : (
-                    <div className="flex items中心 justify-between">
+                    <div className="flex items-center justify-between">
                       <div className="text-sm">
                         <div>{fmt(s.start_at)} - {fmt(s.end_at)}</div>
                         <div className="opacity-70">エリア: {s.area_code ?? '-'}／会場: {s.venue_hint ?? '-'}</div>
@@ -810,15 +815,42 @@ function Availability({ onBack, supaUser }: { onBack: () => void; supaUser: Supa
   );
 }
 
-function ProfileEditor({ loading, profile, onSave, onCancel }: { loading: boolean; profile: ProfileRow | null; onSave: (p: { nickname: string | null; level: number | null; area_code: string | null }) => void; onCancel: () => void }) {
+// 拡張版プロフィールエディタ
+function ProfileEditor({
+  loading,
+  profile,
+  onSave,
+  onCancel,
+}: {
+  loading: boolean;
+  profile: ProfileRow | null;
+  onSave: (p: Omit<ProfileRow, 'user_id'>) => void;
+  onCancel: () => void;
+}) {
   const [nickname, setNickname] = useState(profile?.nickname ?? '');
   const [level, setLevel] = useState<number>(profile?.level ?? 3);
   const [area, setArea] = useState<string>(profile?.area_code ?? 'yokohama');
+
+  // 追加フィールド（空文字は使わず 'unset' を採用）
+  const [gender, setGender] = useState<'unset' | 'male' | 'female' | 'other'>(
+    (profile?.gender ?? 'unset') as 'unset' | 'male' | 'female' | 'other'
+  );
+  const [hand, setHand] = useState<'unset' | 'right' | 'left'>(
+    (profile?.hand ?? 'unset') as 'unset' | 'right' | 'left'
+  );
+  const [playStyle, setPlayStyle] = useState<string>(profile?.play_style ?? 'unset');
+  const [bio, setBio] = useState<string>(profile?.bio ?? '');
+  const [avatarUrl, setAvatarUrl] = useState<string>(profile?.avatar_url ?? '');
 
   useEffect(() => {
     setNickname(profile?.nickname ?? '');
     setLevel(profile?.level ?? 3);
     setArea(profile?.area_code ?? 'yokohama');
+    setGender((profile?.gender ?? 'unset') as 'unset' | 'male' | 'female' | 'other');
+    setHand((profile?.hand ?? 'unset') as 'unset' | 'right' | 'left');
+    setPlayStyle(profile?.play_style ?? 'unset');
+    setBio(profile?.bio ?? '');
+    setAvatarUrl(profile?.avatar_url ?? '');
   }, [profile]);
 
   return (
@@ -828,10 +860,12 @@ function ProfileEditor({ loading, profile, onSave, onCancel }: { loading: boolea
         <div>読み込み中…</div>
       ) : (
         <>
+          {/* 基本 */}
           <div className="space-y-2">
             <div className="text-sm">ニックネーム</div>
             <Input value={nickname ?? ''} onChange={(e) => setNickname(e.target.value)} />
           </div>
+
           <div className="space-y-2">
             <div className="text-sm">レベル（1 最弱 〜 6 最強）</div>
             <Select value={String(level)} onValueChange={(v) => setLevel(Number(v))}>
@@ -846,6 +880,7 @@ function ProfileEditor({ loading, profile, onSave, onCancel }: { loading: boolea
               </SelectContent>
             </Select>
           </div>
+
           <div className="space-y-2">
             <div className="text-sm">活動エリア</div>
             <Select value={area} onValueChange={(v) => setArea(v)}>
@@ -857,8 +892,91 @@ function ProfileEditor({ loading, profile, onSave, onCancel }: { loading: boolea
               </SelectContent>
             </Select>
           </div>
+
+          {/* 追加フィールド */}
+          <div className="space-y-2">
+            <div className="text-sm">性別</div>
+            <Select
+              value={gender}
+              onValueChange={(v) => setGender(v as 'unset' | 'male' | 'female' | 'other')}
+            >
+              <SelectTrigger className="w-[200px]"><SelectValue placeholder="未設定" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="unset">未設定</SelectItem>
+                <SelectItem value="male">男性</SelectItem>
+                <SelectItem value="female">女性</SelectItem>
+                <SelectItem value="other">その他</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="space-y-2">
+            <div className="text-sm">利き手</div>
+            <Select
+              value={hand}
+              onValueChange={(v) => setHand(v as 'unset' | 'right' | 'left')}
+            >
+              <SelectTrigger className="w-[200px]"><SelectValue placeholder="未設定" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="unset">未設定</SelectItem>
+                <SelectItem value="right">右</SelectItem>
+                <SelectItem value="left">左</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="space-y-2">
+            <div className="text-sm">戦型</div>
+            <Select value={playStyle} onValueChange={(v) => setPlayStyle(v)}>
+              <SelectTrigger className="w-[220px]"><SelectValue placeholder="未設定" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="unset">未設定</SelectItem>
+                <SelectItem value="shake_drive">シェーク/ドライブ</SelectItem>
+                <SelectItem value="pen_fast">ペン/前陣速攻</SelectItem>
+                <SelectItem value="chopper">カットマン</SelectItem>
+                <SelectItem value="two_wing">両ハンドドライブ</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="space-y-2">
+            <div className="text-sm">自己紹介（最大500文字）</div>
+            <Textarea
+              value={bio}
+              onChange={(e) => setBio(e.target.value.slice(0, 500))}
+              placeholder="例：週2回練習。ゲーム/多球歓迎。台の確保可など"
+            />
+            <div className="text-xs opacity-60 text-right">{bio.length}/500</div>
+          </div>
+
+          <div className="space-y-2">
+            <div className="text-sm">プロフィール画像（URL）</div>
+            <Input
+              value={avatarUrl}
+              onChange={(e) => setAvatarUrl(e.target.value)}
+              placeholder="例：https://..."
+            />
+            <div className="text-xs opacity-60">※ 画像アップロードは後で実装予定。まずは URL で表示します。</div>
+          </div>
+
+          {/* アクション */}
           <div className="flex gap-2 pt-2">
-            <Button onClick={() => onSave({ nickname, level, area_code: area })}>保存</Button>
+            <Button
+              onClick={() =>
+                onSave({
+                  nickname,
+                  level,
+                  area_code: area,
+                  gender: gender === 'unset' ? null : gender,
+                  hand: hand === 'unset' ? null : hand,
+                  play_style: playStyle === 'unset' ? null : playStyle,
+                  bio: bio || null,
+                  avatar_url: avatarUrl || null,
+                })
+              }
+            >
+              保存
+            </Button>
             <Button variant="secondary" onClick={onCancel}>キャンセル</Button>
           </div>
         </>
