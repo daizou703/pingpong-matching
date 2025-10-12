@@ -102,8 +102,17 @@ const SAMPLE_USERS: UserRow[] = [
   },
 ];
 
-export default function App() {
-  const [view, setView] = useState<View>('home');
+function App() {
+  const [view, setView] = useState<View>(() => {
+    if (typeof window !== 'undefined') {
+      const hash = window.location.hash.replace(/^#/, '');
+      const saved = window.sessionStorage.getItem('lastView') ?? '';
+      const candidate = (hash || saved) as View;
+      const views: View[] = ['home','detail','proposal','chat','summary','availability','profile','register'];
+      if (views.includes(candidate)) return candidate;
+    }
+    return 'home';
+  });
   const [selected, setSelected] = useState<UserRow>(SAMPLE_USERS[0]);
   const [filters, setFilters] = useState<Filters>({ distance: 5, levelDiff: 1, times: ['平日夜'], prefs: ['多球', 'ゲーム'] });
   const [proposal, setProposal] = useState({ datetime: '10/24 19:00-21:00', place: '××卓球場 第2卓', memo: 'よろしくお願いします！' });
@@ -121,41 +130,77 @@ export default function App() {
   useEffect(() => {
     const sb = getSupabase();
     if (!sb) return;
+
+    // 初期セッション復元
     (async () => {
       const { data } = await sb.auth.getSession();
       setSession(data.session);
       setSupaUser(data.session?.user ?? null);
       if (data.session?.user) await ensureProfile(data.session.user);
     })();
+
+    // 以後の変化を購読
     const { data: sub } = sb.auth.onAuthStateChange(async (_event: AuthChangeEvent, sess: Session | null) => {
       setSession(sess);
       setSupaUser(sess?.user ?? null);
 
       if (sess?.user) {
         const created = await ensureProfile(sess.user);
-        const fromRegister = typeof window !== 'undefined'
-          ? window.localStorage.getItem('fromRegister')
-          : null;
+        const fromRegister = typeof window !== 'undefined' ? window.localStorage.getItem('fromRegister') : null;
 
-        // 新規ユーザーは必ずプロフィール編集へ、既存ユーザーの登録画面経由はホームへ
-        if (created) {
-          setView('profile');
-        } else if (fromRegister === '1' || view === 'register') {
-          setView('home');
-        }
+        // 新規はプロフィールへ。登録フロー経由は home。それ以外は画面維持。
+        setView((prev) => {
+          if (created) return 'profile';
+          if (prev === 'register' || fromRegister === '1') return 'home';
+          return prev;
+        });
 
         if (fromRegister) {
           try { window.localStorage.removeItem('fromRegister'); } catch {}
         }
       }
     });
+
     return () => sub.subscription.unsubscribe();
-  }, [view]);
+  }, []); // ← 依存は空
+
 
   // Guard: すでにセッションがあるのに register に居続けないようにする
   useEffect(() => {
     if (session && view === 'register') setView('profile');
   }, [session, view]);
+
+    // ★ 追加: 画面状態をURLハッシュ & sessionStorageに同期
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    // URLの #hash を現在の view に合わせる（履歴を汚さない）
+    const url = new URL(window.location.href);
+    url.hash = view;
+    window.history.replaceState(null, '', url.toString());
+    // 直前の view を sessionStorage にも保持（念のため）
+    try {
+      window.sessionStorage.setItem('lastView', view);
+    } catch {}
+  }, [view]);
+
+  // ★ 追加: 初回マウント時に #hash or sessionStorage から view を復元
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const hash = window.location.hash.replace(/^#/, '');
+    const saved = window.sessionStorage.getItem('lastView') ?? '';
+    // 許可されている view 一覧
+    const views: View[] = [
+      'home', 'detail', 'proposal', 'chat', 'summary', 'availability', 'profile', 'register'
+    ];
+
+    const candidate = (hash || saved) as View;
+    if (views.includes(candidate) && candidate !== view) {
+      setView(candidate);
+    }
+  // 初回のみ
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // --- robust logout (with fallback) ---
   async function handleLogout() {
@@ -230,36 +275,36 @@ export default function App() {
   }
 
     // --- account deletion (退会) ---
-async function handleDeleteAccount() {
-  if (!supaUser) return;
-  if (!confirm('退会します。プロフィールと可用時間などの登録情報を削除します。よろしいですか？この操作は元に戻せません。')) return;
+  async function handleDeleteAccount() {
+    if (!supaUser) return;
+    if (!confirm('退会します。プロフィールと可用時間などの登録情報を削除します。よろしいですか？この操作は元に戻せません。')) return;
 
-  const sb = getSupabase();
-  try {
-// 1) 可用時間を削除
-    const { error: errSlots } = await sb
-      .from('availability_slots')
-      .delete()
-      .eq('user_id', supaUser.id);
-    if (errSlots) throw errSlots;
+    const sb = getSupabase();
+    try {
+  // 1) 可用時間を削除
+      const { error: errSlots } = await sb
+        .from('availability_slots')
+        .delete()
+        .eq('user_id', supaUser.id);
+      if (errSlots) throw errSlots;
 
-    // 2) プロフィールを削除（自分の1件想定。存在しない可能性もあるのでそのままOK）
-    const { error: errProf } = await sb
-      .from('profiles')
-      .delete()
-      .eq('user_id', supaUser.id);
-    if (errProf) throw errProf;
+      // 2) プロフィールを削除（自分の1件想定。存在しない可能性もあるのでそのままOK）
+      const { error: errProf } = await sb
+        .from('profiles')
+        .delete()
+        .eq('user_id', supaUser.id);
+      if (errProf) throw errProf;
 
-    // 3) ローカル状態クリア → サインアウト → ホームへ
-    setProfile(null);
-    await handleLogout();
-    alert('退会処理が完了しました。ご利用ありがとうございました。');
-    setView('home');
-  } catch (e: unknown) {
-  const msg = e instanceof Error ? e.message : String(e);
-  console.error(msg);
+      // 3) ローカル状態クリア → サインアウト → ホームへ
+      setProfile(null);
+      await handleLogout();
+      alert('退会処理が完了しました。ご利用ありがとうございました。');
+      setView('home');
+    } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(msg);
+    }
   }
-}
 
   const sortedUsers = useMemo(() => SAMPLE_USERS.slice().sort((a, b) => b.rating - a.rating), []);
 
@@ -371,7 +416,8 @@ async function handleDeleteAccount() {
     </div>
   );
 }
-
+import dynamic from 'next/dynamic';
+export default dynamic(() => Promise.resolve(App), { ssr: false });
 
 function LoginButtons() {
   const [email, setEmail] = useState('');
@@ -644,7 +690,7 @@ function Availability({ onBack, supaUser }: { onBack: () => void; supaUser: Supa
   const [editVenue, setEditVenue] = useState<string>('');
 
   useEffect(() => {
-    if (!supaUser) return;
+    if (!supaUser?.id) return;
     (async () => {
       setLoading(true);
       const { data, error } = await supabase
@@ -656,7 +702,7 @@ function Availability({ onBack, supaUser }: { onBack: () => void; supaUser: Supa
       setSlots((data ?? []) as SlotRow[]);
       setLoading(false);
     })();
-  }, [supaUser]);
+  }, [supaUser?.id]); // ★ ここを supaUser から supaUser?.id に
 
   // 表示用
   function fmt(dt: string) {
