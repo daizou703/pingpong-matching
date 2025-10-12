@@ -46,14 +46,17 @@ export type UserRow = {
 export type ProfileRow = {
   user_id: string;
   nickname: string | null;
-  level: number | null; // 1-6
+  level: number | null;      // 1-6
   area_code: string | null;
-  gender: 'male' | 'female' | 'other' | null;
-  hand: 'right' | 'left' | null;
-  play_style: string | null;
-  bio: string | null;
-  avatar_url: string | null;
+  gender?: 'male' | 'female' | 'other' | null;
+  hand?: 'right' | 'left' | null;
+  play_style?: string | null;
+  bio?: string | null;
+  avatar_url?: string | null;
+  years?: number | null;
+  purpose?: string[] | null;
 };
+
 
 // 可用時間スロットの型（編集/一覧で使用）
 export type SlotRow = {
@@ -191,7 +194,7 @@ export default function App() {
 
     const { data: existing } = await sb
       .from('profiles')
-      .select('user_id,nickname,level,area_code,gender,hand,play_style,bio,avatar_url')
+      .select('user_id,nickname,level,area_code,gender,hand,play_style,bio,avatar_url,years,purpose')
       .eq('user_id', user.id)
       .maybeSingle();
 
@@ -206,6 +209,8 @@ export default function App() {
         play_style: null,
         bio: null,
         avatar_url: null,
+        years: null,
+        purpose: null,
       };
       const { data: up, error: upErr } = await sb
         .from('profiles')
@@ -302,11 +307,27 @@ export default function App() {
               play_style: next.play_style,
               bio: next.bio,
               avatar_url: next.avatar_url,
+              years: next.years ?? null,
+              purpose: next.purpose ?? null,
             });
             if (error) {
               alert('保存に失敗しました: ' + error.message);
             } else {
-              setProfile({ user_id: supaUser.id, ...next });
+              setProfile((prev) => ({
+                user_id: supaUser!.id,
+                nickname: next.nickname ?? prev?.nickname ?? null,
+                level:    next.level    ?? prev?.level    ?? null,
+                area_code: next.area_code ?? prev?.area_code ?? null,
+                // 既存の詳細属性は「前の値を保持」
+                gender:     prev?.gender ?? null,
+                hand:       prev?.hand ?? null,
+                play_style: prev?.play_style ?? null,
+                bio:        prev?.bio ?? null,
+                avatar_url: prev?.avatar_url ?? null,
+                // 新規追加の2項目も保持
+                years:   prev?.years ?? null,
+                purpose: prev?.purpose ?? null,
+              }));
               alert('保存しました');
               setView('home');
             }
@@ -824,12 +845,27 @@ function ProfileEditor({
 }: {
   loading: boolean;
   profile: ProfileRow | null;
-  onSave: (p: Omit<ProfileRow, 'user_id'>) => void;
+  onSave: (p: {
+    nickname: string | null;
+    level: number | null;
+    area_code: string | null;
+    gender?: 'male' | 'female' | 'other' | null;
+    hand?: 'right' | 'left' | null;
+    play_style?: string | null;
+    bio?: string | null;
+    avatar_url?: string | null;
+    years?: number | null;
+    purpose?: string[] | null;
+  }) => void;
   onCancel: () => void;
 }) {
+
   const [nickname, setNickname] = useState(profile?.nickname ?? '');
   const [level, setLevel] = useState<number>(profile?.level ?? 3);
   const [area, setArea] = useState<string>(profile?.area_code ?? 'yokohama');
+  const [years, setYears] = useState<number>(profile?.years ?? 0);
+  const [purpose, setPurpose] = useState<string[]>(profile?.purpose ?? []);
+  const practiceOptions = ['多球', 'サーブ', 'ゲーム', '基礎'];
 
   // 追加フィールド（空文字は使わず 'unset' を採用）
   const [gender, setGender] = useState<'unset' | 'male' | 'female' | 'other'>(
@@ -851,6 +887,8 @@ function ProfileEditor({
     setPlayStyle(profile?.play_style ?? 'unset');
     setBio(profile?.bio ?? '');
     setAvatarUrl(profile?.avatar_url ?? '');
+    setYears(profile?.years ?? 0);
+    setPurpose(profile?.purpose ?? []);
   }, [profile]);
 
   return (
@@ -939,6 +977,61 @@ function ProfileEditor({
             </Select>
           </div>
 
+                    {/* ここまでが既存: 活動エリア */}
+
+          {/* 追加1: 卓球経験年数 */}
+          <div className="space-y-2">
+            <div className="text-sm">卓球歴（年数）</div>
+            <div className="flex items-center gap-3">
+              <Select
+                value={String(years)}
+                onValueChange={(v) => setYears(Number(v))}
+              >
+                <SelectTrigger className="w-[160px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="0">0 年（はじめたばかり）</SelectItem>
+                  <SelectItem value="1">1 年</SelectItem>
+                  <SelectItem value="2">2 年</SelectItem>
+                  <SelectItem value="3">3 年</SelectItem>
+                  <SelectItem value="4">4 年</SelectItem>
+                  <SelectItem value="5">5 年</SelectItem>
+                  <SelectItem value="6">6 年</SelectItem>
+                  <SelectItem value="7">7 年</SelectItem>
+                  <SelectItem value="8">8 年</SelectItem>
+                  <SelectItem value="9">9 年</SelectItem>
+                  <SelectItem value="10">10 年以上</SelectItem>
+                </SelectContent>
+              </Select>
+              <div className="text-xs opacity-70">※ ざっくりでOK</div>
+            </div>
+          </div>
+
+          {/* 追加2: 目的（複数選択可） */}
+          <div className="space-y-2">
+            <div className="text-sm">目的（複数選択可）</div>
+            <div className="flex gap-2 flex-wrap">
+              {practiceOptions.map((p) => {
+                const active = purpose.includes(p);
+                return (
+                  <Badge
+                    key={p}
+                    variant={active ? 'default' : 'secondary'}
+                    className="cursor-pointer"
+                    onClick={() =>
+                      setPurpose((prev) =>
+                        prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]
+                      )
+                    }
+                  >
+                    {p}
+                  </Badge>
+                );
+              })}
+            </div>
+          </div>
+
           <div className="space-y-2">
             <div className="text-sm">自己紹介（最大500文字）</div>
             <Textarea
@@ -972,6 +1065,9 @@ function ProfileEditor({
                   play_style: playStyle === 'unset' ? null : playStyle,
                   bio: bio || null,
                   avatar_url: avatarUrl || null,
+                  // ↓↓↓ 足す（stateが無ければ profile?.years / profile?.purpose を使ってOK）
+                  years: typeof years === 'number' ? years : (profile?.years ?? null),
+                  purpose: Array.isArray(purpose) ? purpose : (profile?.purpose ?? null),
                 })
               }
             >
