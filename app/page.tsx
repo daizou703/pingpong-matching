@@ -158,6 +158,9 @@ function App() {
         if (fromRegister) {
           try { window.localStorage.removeItem('fromRegister'); } catch {}
         }
+      } else {
+    // ★ 追加：セッションが無い＝ログアウト時はホームへ
+    setView('home');
       }
     });
 
@@ -227,6 +230,7 @@ function App() {
       setSession(null);
       setSupaUser(null);
       setProfile(null);
+      setView('home'); // ★ 追加：必ずホームへ
     }
   }
 
