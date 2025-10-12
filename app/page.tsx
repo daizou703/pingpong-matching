@@ -1,1176 +1,685 @@
-'use client';
+"use client";
 
-// page.tsx - cleaned v0.3.0 (profile fields expanded, types fixed)
-import React, { useEffect, useMemo, useState } from 'react';
-import { createClient, type Session, type User as SupaUser } from '@supabase/supabase-js';
-import type { AuthChangeEvent } from '@supabase/supabase-js';
-import { Card, CardContent } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Badge } from '@/components/ui/badge';
-import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheet';
-import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
-import { Textarea } from '@/components/ui/textarea';
-import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
-import { Slider } from '@/components/ui/slider';
-import { MessageSquare, Filter, MapPin, Star, Clock, ArrowLeft, CheckCircle2 } from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import type { User, Session, AuthChangeEvent, RealtimeChannel } from "@supabase/supabase-js";
+import { supabase } from "@/lib/supabaseClient";
+import type { Tables, TablesInsert, TablesUpdate } from "@/types/supabase";
 
-// ---- Supabase Client（クライアント側） ----
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL as string | undefined;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY as string | undefined;
-if (!supabaseUrl || !supabaseAnonKey) {
-  console.error('Supabase env is missing: NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY');
+const dtFmt = new Intl.DateTimeFormat("ja-JP", {
+  timeZone: "Asia/Tokyo",
+  dateStyle: "short",
+  timeStyle: "short",
+});
+
+/* =========================
+   Tables 型（生成型からエイリアス）
+   ========================= */
+type ProfileRow    = Tables<"profiles">;
+type ProfileInsert = TablesInsert<"profiles">;
+type ProfileUpdate = TablesUpdate<"profiles">;
+
+type SlotRow       = Tables<"availability_slots">;
+type SlotInsert    = TablesInsert<"availability_slots">;
+
+type MatchRow      = Tables<"matches">;
+type MatchInsert   = TablesInsert<"matches">;
+type MatchStatus   = MatchRow["status"];
+
+type MessageRow    = Tables<"messages">;
+type MessageInsert = TablesInsert<"messages">;
+
+// Enum（DBの型に追従）
+type Gender        = ProfileRow["gender"];
+type Hand          = ProfileRow["hand"];
+type PlayingStyle  = ProfileRow["play_style"];
+
+/* =========================
+   Helpers
+   ========================= */
+const fmtDate = (v: string | null | undefined) => (v ? dtFmt.format(new Date(v)) : "-");
+
+/** プロファイルが無ければ作る */
+async function ensureProfile(user: User): Promise<ProfileRow> {
+  const { data: found, error: findErr } = await supabase
+    .from("profiles")
+    .select("*")
+    .eq("user_id", user.id)
+    .maybeSingle();
+  if (findErr) throw findErr;
+  if (found) return found;
+
+  const payload: ProfileInsert = {
+    user_id: user.id,
+    nickname: (user.user_metadata?.name as string | undefined) ?? null,
+    avatar_url: (user.user_metadata?.avatar_url as string | undefined) ?? null,
+    // Insert に存在しない列は入れない（never/型ズレの原因）
+  };
+
+  const { data: insData, error: insErr } = await supabase
+    .from("profiles")
+    .insert([payload])
+    .select()
+    .maybeSingle();
+  if (insErr) throw insErr;
+  if (!insData) throw new Error("Failed to insert profile");
+  return insData;
 }
-export const supabase = createClient(supabaseUrl ?? '', supabaseAnonKey ?? '');
-// simple wrapper to align with code paths expecting getSupabase
-export function getSupabase() { return supabase; }
 
-// ---- Type definitions ----
-export type View = 'home' | 'detail' | 'proposal' | 'chat' | 'summary' | 'availability' | 'profile' | 'register';
-export type Filters = { distance: number; levelDiff: number; times: string[]; prefs: string[] };
-export type UserRow = {
-  id: string;
-  name: string;
-  level: string;
-  rating: number;
-  style: string;
-  years: number;
-  prefs: string[];
-  distanceMinWalk: number;
-  slot: string;
-  area: string;
-  intro: string;
-};
-
-// プロフィール（拡張版）
-export type ProfileRow = {
-  user_id: string;
-  nickname: string | null;
-  level: number | null;      // 1-6
-  area_code: string | null;
-  gender?: 'male' | 'female' | 'other' | null;
-  hand?: 'right' | 'left' | null;
-  play_style?: string | null;
-  bio?: string | null;
-  avatar_url?: string | null;
-  years?: number | null;
-  purpose?: string[] | null;
-};
-
-
-// 可用時間スロットの型（編集/一覧で使用）
-export type SlotRow = {
-  id: number;
-  user_id: string;
-  start_at: string; // ISO string
-  end_at: string;   // ISO string
-  area_code: string | null;
-  venue_hint: string | null;
-  is_recurring: boolean | null;
-  recur_dow?: number | null;     // 0=Sun ... 6=Sat
-  recur_start?: string | null;   // 'HH:MM'
-  recur_end?: string | null;     // 'HH:MM'
-  created_at?: string;
-};
-
-const SAMPLE_USERS: UserRow[] = [
-  {
-    id: 'u1',
-    name: 'たろう',
-    level: '中級',
-    rating: 4.8,
-    style: '右シェーク/ドライブ',
-    years: 5,
-    prefs: ['多球', 'ゲーム'],
-    distanceMinWalk: 12,
-    slot: '10/24 19:00-21:00',
-    area: '横浜駅±5km',
-    intro: '○○区で週2練習しています。台確保はお任せください。',
-  },
-  {
-    id: 'u2',
-    name: 'はなこ',
-    level: '初中級',
-    rating: 4.6,
-    style: '右ペン/前陣速攻',
-    years: 2,
-    prefs: ['サーブ', '基礎'],
-    distanceMinWalk: 8,
-    slot: '10/27 09:00-11:00',
-    area: '横浜駅±5km',
-    intro: '基礎練多めでお願いします。',
-  },
-];
-
-function App() {
-  const [view, setView] = useState<View>(() => {
-    if (typeof window !== 'undefined') {
-      const hash = window.location.hash.replace(/^#/, '');
-      const saved = window.sessionStorage.getItem('lastView') ?? '';
-      const candidate = (hash || saved) as View;
-      const views: View[] = ['home','detail','proposal','chat','summary','availability','profile','register'];
-      if (views.includes(candidate)) return candidate;
-    }
-    return 'home';
-  });
-  const [selected, setSelected] = useState<UserRow>(SAMPLE_USERS[0]);
-  const [filters, setFilters] = useState<Filters>({ distance: 5, levelDiff: 1, times: ['平日夜'], prefs: ['多球', 'ゲーム'] });
-  const [proposal, setProposal] = useState({ datetime: '10/24 19:00-21:00', place: '××卓球場 第2卓', memo: 'よろしくお願いします！' });
-  const [messages, setMessages] = useState<{ who: 'me' | 'partner'; text: string }[]>([
-    { who: 'partner', text: '10/24 19:00-21:00 どうですか？' },
-    { who: 'me', text: 'OKです。会場は××卓球場で。' },
-  ]);
-  const [input, setInput] = useState('');
-
+/* =========================
+   Main Page Component
+   ========================= */
+export default function Page() {
+  const sb = useMemo(() => supabase, []);
   const [session, setSession] = useState<Session | null>(null);
-  const [supaUser, setSupaUser] = useState<SupaUser | null>(null);
+  const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<ProfileRow | null>(null);
-  const [loadingProfile, setLoadingProfile] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
 
+  // Magic Link
+  const [email, setEmail] = useState("");
+  const [emailSent, setEmailSent] = useState(false);
+
+  // Profile form state
+  const [nickname, setNickname] = useState<string>("");
+  const [level, setLevel] = useState<number | "">("");
+  const [areaCode, setAreaCode] = useState<string>("");
+  const [gender, setGender] = useState<Gender | "">("");
+  const [hand, setHand] = useState<Hand | "">("");
+  const [playingStyle, setPlayingStyle] = useState<PlayingStyle | "">("");
+  const [years, setYears] = useState<number | "">("");
+  const [purpose, setPurpose] = useState<string>("");
+  const [avatarUrl, setAvatarUrl] = useState<string>("");
+  const [profileColumns, setProfileColumns] = useState<string[]>([]); // 存在列の検出用（将来の互換保持）
+
+  // Availability state
+  const [slots, setSlots] = useState<SlotRow[]>([]);
+  const [startAt, setStartAt] = useState<string>("");
+  const [endAt, setEndAt] = useState<string>("");
+  const [slotArea, setSlotArea] = useState<string>("");
+  const [venueHint, setVenueHint] = useState<string>("");
+  const [isRecurring, setIsRecurring] = useState<boolean>(false);
+
+  // Browse users for proposal
+  const [allUsers, setAllUsers] = useState<ProfileRow[]>([]);
+  const [userFilter, setUserFilter] = useState<string>("");
+
+  // Matches & messages
+  const [matches, setMatches] = useState<MatchRow[]>([]);
+  const [activeMatchId, setActiveMatchId] = useState<MatchRow["id"] | null>(null); // ← number想定（生成型に追従）
+  const [messages, setMessages] = useState<MessageRow[]>([]);
+  const [chatBody, setChatBody] = useState<string>("");
+  const chatChannelRef = useRef<RealtimeChannel | null>(null);
+
+  // OAuth コールバック交換＋URLクリーン
   useEffect(() => {
-    const sb = getSupabase();
-    if (!sb) return;
-
-    // 初期セッション復元
+    let mounted = true;
     (async () => {
-      const { data } = await sb.auth.getSession();
-      setSession(data.session);
-      setSupaUser(data.session?.user ?? null);
-      if (data.session?.user) await ensureProfile(data.session.user);
+      try {
+        const url = new URL(window.location.href);
+        const hasCode = url.searchParams.get("code") && url.searchParams.get("state");
+        if (hasCode) {
+          const { error } = await sb.auth.exchangeCodeForSession(window.location.href);
+          if (error) console.error("[AUTH] exchange error:", error);
+          url.search = "";
+          window.history.replaceState({}, "", url.toString());
+        }
+        const { data } = await sb.auth.getSession();
+        if (!mounted) return;
+        setSession(data.session ?? null);
+        setUser(data.session?.user ?? null);
+        if (data.session?.user) {
+          const pf = await ensureProfile(data.session.user);
+          if (!mounted) return;
+          setProfile(pf);
+          setProfileColumns(Object.keys(pf));
+          hydrateFormFromProfile(pf);
+          await Promise.all([fetchSlots(data.session.user), fetchProfiles(data.session.user), fetchMatches(data.session.user)]);
+        }
+      } catch (e) { console.error("[AUTH] init error:", e); }
     })();
 
-    // 以後の変化を購読
     const { data: sub } = sb.auth.onAuthStateChange(async (_event: AuthChangeEvent, sess: Session | null) => {
       setSession(sess);
-      setSupaUser(sess?.user ?? null);
-
-      if (sess?.user) {
-        const created = await ensureProfile(sess.user);
-        const fromRegister = typeof window !== 'undefined' ? window.localStorage.getItem('fromRegister') : null;
-
-        // 新規はプロフィールへ。登録フロー経由は home。それ以外は画面維持。
-        setView((prev) => {
-          if (created) return 'profile';
-          if (prev === 'register' || fromRegister === '1') return 'home';
-          return prev;
-        });
-
-        if (fromRegister) {
-          try { window.localStorage.removeItem('fromRegister'); } catch {}
-        }
+      const u = sess?.user ?? null;
+      setUser(u);
+      if (u) {
+        const pf = await ensureProfile(u);
+        setProfile(pf);
+        setProfileColumns(Object.keys(pf));
+        hydrateFormFromProfile(pf);
+        await Promise.all([fetchSlots(u), fetchProfiles(u), fetchMatches(u)]);
       } else {
-    // ★ 追加：セッションが無い＝ログアウト時はホームへ
-    setView('home');
+        setProfile(null); setProfileColumns([]); resetForm();
+        setSlots([]); setAllUsers([]); setMatches([]); setActiveMatchId(null); setMessages([]);
       }
     });
+    return () => { try { sub.subscription?.unsubscribe(); } catch {} mounted = false; };
+  }, [sb]);
 
-    return () => sub.subscription.unsubscribe();
-  }, []); // ← 依存は空
+  const hydrateFormFromProfile = (pf: ProfileRow) => {
+    setNickname(pf.nickname ?? "");
+    setLevel((pf.level as number | null) ?? "");
+    setAreaCode(pf.area_code ?? "");
+    setGender(pf.gender ?? "");
+    setHand(pf.hand ?? "");
+    setPlayingStyle(pf.play_style ?? "");
+    setYears((pf.years as number | null) ?? "");
+    setPurpose((pf.purpose ?? []).join(","));
+    setAvatarUrl(pf.avatar_url ?? "");
+  };
+  const resetForm = () => {
+    setNickname(""); setLevel(""); setAreaCode(""); setGender(""); setHand(""); setPlayingStyle("");
+    setYears(""); setPurpose(""); setAvatarUrl("");
+  };
 
+  const fetchProfiles = async (u: User) => {
+    const { data, error } = await sb.from("profiles").select("*").neq("user_id", u.id).limit(50);
+    if (!error && data) setAllUsers(data);
+  };
 
-  // Guard: すでにセッションがあるのに register に居続けないようにする
-  useEffect(() => {
-    if (session && view === 'register') setView('profile');
-  }, [session, view]);
+  const fetchSlots = async (u: User) => {
+    const { data, error } = await sb
+      .from("availability_slots").select("*").eq("user_id", u.id).order("start_at", { ascending: true });
+    if (!error && data) setSlots(data);
+  };
 
-    // ★ 追加: 画面状態をURLハッシュ & sessionStorageに同期
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    // URLの #hash を現在の view に合わせる（履歴を汚さない）
-    const url = new URL(window.location.href);
-    url.hash = view;
-    window.history.replaceState(null, '', url.toString());
-    // 直前の view を sessionStorage にも保持（念のため）
+  const fetchMatches = async (u: User) => {
+    const { data, error } = await sb
+      .from("matches")
+      .select("*")
+      .or(`user_a.eq.${u.id},user_b.eq.${u.id}`)
+      .order("start_at", { ascending: true });
+    if (!error && data) setMatches(data);
+  };
+
+  const fetchMessages = async (matchId: NonNullable<MatchRow["id"]>) => {
+    const { data, error } = await sb
+      .from("messages")
+      .select("*")
+      .eq("match_id", matchId) // ← number で検索
+      .order("sent_at", { ascending: true });
+    if (!error && data) setMessages(data);
+  };
+
+  const handleAddSlot = async () => {
+    if (!user) return;
+    setBusy(true); setMsg(null);
     try {
-      window.sessionStorage.setItem('lastView', view);
-    } catch {}
-  }, [view]);
-
-  // ★ 追加: 初回マウント時に #hash or sessionStorage から view を復元
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-
-    const hash = window.location.hash.replace(/^#/, '');
-    const saved = window.sessionStorage.getItem('lastView') ?? '';
-    // 許可されている view 一覧
-    const views: View[] = [
-      'home', 'detail', 'proposal', 'chat', 'summary', 'availability', 'profile', 'register'
-    ];
-
-    const candidate = (hash || saved) as View;
-    if (views.includes(candidate) && candidate !== view) {
-      setView(candidate);
-    }
-  // 初回のみ
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // --- robust logout (with fallback) ---
-  async function handleLogout() {
-    try {
-      const sb = getSupabase();
-      if (!sb) throw new Error('Supabase not initialized');
-      // Try global sign-out first (revokes refresh tokens on server)
-      const { error } = await sb.auth.signOut({ scope: 'global' as const });
-      if (error) {
-        console.warn('global signOut failed, fallback to local', error);
-        await sb.auth.signOut({ scope: 'local' as const });
-      }
-    } catch (e) {
-      console.error('signOut error', e);
-      // Hard fallback: purge local auth tokens (key format: sb-*-auth-token)
-      try {
-        if (typeof window !== 'undefined') {
-          Object.keys(window.localStorage)
-            .filter((k) => k.startsWith('sb-') && k.endsWith('-auth-token'))
-            .forEach((k) => window.localStorage.removeItem(k));
-        }
-      } catch {}
-    } finally {
-      setSession(null);
-      setSupaUser(null);
-      setProfile(null);
-      setView('home'); // ★ 追加：必ずホームへ
-    }
-  }
-
-  // 既存の ensureProfile を拡張
-  async function ensureProfile(user: SupaUser): Promise<boolean> {
-    const sb = getSupabase();
-    if (!sb) return false;
-    setLoadingProfile(true);
-    let created = false;
-
-    const { data: existing } = await sb
-      .from('profiles')
-      .select('user_id,nickname,level,area_code,gender,hand,play_style,bio,avatar_url,years,purpose')
-      .eq('user_id', user.id)
-      .maybeSingle();
-
-    if (!existing) {
-      const seed: ProfileRow = {
+      if (!startAt || !endAt || !slotArea) { setMsg("開始/終了日時とエリアは必須です"); return; }
+      const payload: SlotInsert = {
         user_id: user.id,
-        nickname: user.email?.split('@')[0] ?? 'no-name',
-        level: 3,
-        area_code: 'yokohama',
-        gender: null,
-        hand: null,
-        play_style: null,
-        bio: null,
-        avatar_url: null,
-        years: null,
-        purpose: null,
+        start_at: new Date(startAt).toISOString(),
+        end_at: new Date(endAt).toISOString(),
+        area_code: slotArea,
+        venue_hint: venueHint || null,
+        is_recurring: !!isRecurring,
       };
-      const { data: up, error: upErr } = await sb
-        .from('profiles')
-        .upsert(seed, { onConflict: 'user_id' })
+      const { data, error } = await sb.from("availability_slots").insert([payload]).select().maybeSingle();
+      if (error) throw error;
+      if (data) {
+        setSlots((prev) => [...prev, data].sort((a, b) => (a.start_at ?? "").localeCompare(b.start_at ?? "")));
+        setStartAt(""); setEndAt(""); setSlotArea(""); setVenueHint(""); setIsRecurring(false);
+        setMsg("空き時間を追加しました。");
+      }
+    } catch (e: any) { setMsg("空き時間の追加に失敗: " + (e?.message ?? String(e))); }
+    finally { setBusy(false); }
+  };
+
+  const handleDeleteSlot = async (slotId: SlotRow["id"]) => {
+    if (slotId == null || !user) return;
+    setBusy(true); setMsg(null);
+    try {
+      const { error } = await sb.from("availability_slots").delete().eq("id", slotId).eq("user_id", user.id);
+      if (error) throw error;
+      setSlots((prev) => prev.filter((s) => s.id !== slotId));
+      setMsg("削除しました。");
+    } catch (e: any) { setMsg("削除に失敗: " + (e?.message ?? String(e))); }
+    finally { setBusy(false); }
+  };
+
+  const handleSaveProfile = async () => {
+    if (!user) return;
+    setBusy(true); setMsg(null);
+    try {
+      // スキーマにある想定のカラムだけ（intro は送らない）
+      const patch: ProfileUpdate = {
+        nickname: nickname || null,
+        level: typeof level === "number" ? level : level === "" ? null : Number(level),
+        area_code: areaCode || null,
+        gender: (gender as Gender) || null,
+        hand: (hand as Hand) || null,
+        play_style: (playingStyle as PlayingStyle) || null,
+        years: typeof years === "number" ? years : years === "" ? null : Number(years),
+        purpose: purpose.trim() === "" ? null : purpose.split(",").map((s) => s.trim()).filter(Boolean),
+        avatar_url: avatarUrl || null,
+      };
+      // （列が実DBに無ければ型エラーで気付けます）
+      const { data, error } = await sb
+        .from("profiles")
+        .update(patch)
+        .eq("user_id", user.id)
         .select()
         .maybeSingle();
-      if (!upErr) {
-        setProfile((up as ProfileRow) ?? seed);
-        created = true;
-      }
-    } else {
-      setProfile(existing as ProfileRow);
-    }
+      if (error) throw error;
+      if (data) { setProfile(data); setProfileColumns(Object.keys(data as any)); hydrateFormFromProfile(data); setMsg("プロフィールを保存しました。"); }
+    } catch (e: any) { setMsg("プロフィール保存に失敗: " + (e?.message ?? String(e))); }
+    finally { setBusy(false); }
+  };
 
-    setLoadingProfile(false);
-    return created;
-  }
+  // --- Matches & Messages ---
+  const [proposalStart, setProposalStart] = useState<string>("");
+  const [proposalEnd, setProposalEnd] = useState<string>("");
+  const [proposalVenue, setProposalVenue] = useState<string>("");
 
-    // --- account deletion (退会) ---
-  async function handleDeleteAccount() {
-    if (!supaUser) return;
-    if (!confirm('退会します。プロフィールと可用時間などの登録情報を削除します。よろしいですか？この操作は元に戻せません。')) return;
-
-    const sb = getSupabase();
+  const handleProposeMatch = async (toUserId: string) => {
+    if (!user) return;
+    if (!proposalStart || !proposalEnd) { setMsg("提案には開始/終了が必要です"); return; }
+    setBusy(true); setMsg(null);
     try {
-  // 1) 可用時間を削除
-      const { error: errSlots } = await sb
-        .from('availability_slots')
-        .delete()
-        .eq('user_id', supaUser.id);
-      if (errSlots) throw errSlots;
+      const payload: MatchInsert = {
+        user_a: user.id,
+        user_b: toUserId,
+        start_at: new Date(proposalStart).toISOString(),
+        end_at: new Date(proposalEnd).toISOString(),
+        venue_text: proposalVenue || null,
+        status: "pending",
+      };
+      const { data, error } = await sb.from("matches").insert([payload]).select().maybeSingle();
+      if (error) throw error;
+      if (data) {
+        setMatches((prev) => [...prev, data].sort((a, b) => (a.start_at ?? "").localeCompare(b.start_at ?? "")));
+        setMsg("対戦提案を作成しました。");
+      }
+    } catch (e: any) { setMsg("提案の作成に失敗: " + (e?.message ?? String(e))); }
+    finally { setBusy(false); }
+  };
 
-      // 2) プロフィールを削除（自分の1件想定。存在しない可能性もあるのでそのままOK）
-      const { error: errProf } = await sb
-        .from('profiles')
-        .delete()
-        .eq('user_id', supaUser.id);
-      if (errProf) throw errProf;
+  const handleMatchStatus = async (matchId: MatchRow["id"], status: MatchStatus) => {
+    if (!user || matchId == null) return;
+    setBusy(true); setMsg(null);
+    try {
+      const { data, error } = await sb
+        .from("matches")
+        .update({ status })
+        .eq("id", matchId)
+        .select()
+        .maybeSingle();
+      if (error) throw error;
+      if (data) {
+        setMatches((prev) => prev.map((m) => m.id === matchId ? data : m));
+        setMsg(`ステータスを ${status} に更新しました。`);
+      }
+    } catch (e: any) { setMsg("ステータス更新に失敗: " + (e?.message ?? String(e))); }
+    finally { setBusy(false); }
+  };
 
-      // 3) ローカル状態クリア → サインアウト → ホームへ
-      setProfile(null);
-      await handleLogout();
-      alert('退会処理が完了しました。ご利用ありがとうございました。');
-      setView('home');
-    } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    console.error(msg);
+  const openChat = async (matchId: NonNullable<MatchRow["id"]>) => {
+    // 既存購読があれば解除
+    try { chatChannelRef.current?.unsubscribe(); } catch {}
+
+    setActiveMatchId(matchId);
+    setChatBody("");
+    await fetchMessages(matchId); // まず既存ログを取得
+
+    // この match のメッセージ INSERT を購読
+    const channel = sb
+      .channel(`messages:${matchId}`)
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "messages", filter: `match_id=eq.${matchId}` },
+        (payload) => {
+          setMessages((prev) => [...prev, payload.new as MessageRow]);
+        }
+      )
+      .subscribe((status) => {
+        if (status === "SUBSCRIBED") {
+          // console.log("Subscribed chat:", matchId);
+        }
+      });
+
+    chatChannelRef.current = channel;
+  };
+
+
+  const handleSendMessage = async () => {
+    if (!user || activeMatchId == null || !chatBody.trim()) return;
+    setBusy(true);
+    try {
+      const payload: MessageInsert = {
+        match_id: activeMatchId as NonNullable<MessageInsert["match_id"]>, // number
+        sender_id: user.id,
+        body: chatBody.trim(),
+        // sent_at に default があれば省略可
+      };
+      const { data, error } = await sb.from("messages").insert([payload]).select().maybeSingle();
+      if (error) throw error;
+      if (data) {
+        setMessages((prev) => [...prev, data]);
+        setChatBody("");
+      }
+    } catch (e: any) { setMsg("メッセージ送信に失敗: " + (e?.message ?? String(e))); }
+    finally { setBusy(false); }
+  };
+
+  const handleGoogleLogin = async () => {
+    try {
+      setBusy(true);
+      const redirectTo = process.env.NODE_ENV === "development" ? "http://localhost:3000/" : new URL("/", window.location.origin).toString();
+      const { data, error } = await sb.auth.signInWithOAuth({ provider: "google", options: { redirectTo, skipBrowserRedirect: true } });
+      if (error) { setMsg("Googleログイン失敗: " + error.message); return; }
+      if (data?.url) window.location.assign(data.url); else setMsg("ログインURLの取得に失敗しました。");
+    } catch (e: any) { setMsg("Googleログイン例外: " + (e?.message ?? String(e))); }
+    finally { setBusy(false); }
+  };
+
+  const handleSendMagicLink = async () => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const emailTrim = email.trim();
+      if (!emailTrim) { setMsg("メールアドレスを入力してください。"); return; }
+      const redirectTo =
+        process.env.NODE_ENV === "development"
+          ? "http://localhost:3000/"
+          : new URL("/", window.location.origin).toString();
+
+      const { error } = await sb.auth.signInWithOtp({
+        email: emailTrim,
+        options: { emailRedirectTo: redirectTo, shouldCreateUser: true },
+      });
+      if (error) throw error;
+
+      setEmailSent(true);
+      setMsg("Magic Link を送信しました。メールを確認してください。");
+    } catch (e: any) {
+      setMsg("Magic Link の送信に失敗: " + (e?.message ?? String(e)));
+    } finally { setBusy(false); }
+  };
+
+  const handleLogout = async () => {
+    try {
+      setBusy(true);
+      const { error } = await sb.auth.signOut({ scope: "global" as const });
+      if (error) { console.warn("[AUTH] global signOut failed, fallback to local", error); await sb.auth.signOut({ scope: "local" as const }); }
+    } catch (e) { console.error("[AUTH] signOut error", e); }
+    finally {
+      try {
+        if (typeof window !== "undefined") {
+          Object.keys(window.localStorage).filter(k => k.startsWith("sb-") || k.includes("supabase") || k.includes("auth")).forEach(k => window.localStorage.removeItem(k));
+        }
+      } catch {}
+      setSession(null); setUser(null); setProfile(null); setProfileColumns([]);
+      resetForm(); setSlots([]); setAllUsers([]); setMatches([]); setActiveMatchId(null); setMessages([]);
+      setBusy(false);
     }
-  }
+  };
 
-  const sortedUsers = useMemo(() => SAMPLE_USERS.slice().sort((a, b) => b.rating - a.rating), []);
-
-  const Header = (
-    <div className="flex items-center justify-between p-4 border-b">
-      <div className="flex items-center gap-2">
-        {view !== 'home' && (
-          <Button variant="ghost" size="icon" onClick={() => setView('home')}>
-            <ArrowLeft className="h-5 w-5" />
-          </Button>
-        )}
-        <div className="font-semibold">卓球マッチング</div>
-      </div>
-      <div className="flex items-center gap-2">
-        <Select defaultValue="yokohama">
-          <SelectTrigger className="w-[160px]"><SelectValue placeholder="エリア" /></SelectTrigger>
-          <SelectContent>
-            <SelectItem value="yokohama">横浜駅±5km</SelectItem>
-            <SelectItem value="shinagawa">品川駅±5km</SelectItem>
-            <SelectItem value="tokyo">東京駅±5km</SelectItem>
-          </SelectContent>
-        </Select>
-        <FilterSheet filters={filters} setFilters={setFilters} />
-        <Button variant="outline" onClick={() => setView('availability')}>可用時間</Button>
-        {!session ? (
-          <div className="flex items-center gap-2">
-            <Button onClick={() => setView('register')}>会員登録</Button>
-            <LoginButtons />
-          </div>
-        ) : (
-          <div className="flex items-center gap-2">
-            <Badge variant="secondary">{profile?.nickname ?? supaUser?.email}</Badge>
-            <Button variant="secondary" onClick={() => setView('profile')}>プロフィール</Button>
-            <Button onClick={handleLogout}>ログアウト</Button>
-          </div>
-        )}
-      </div>
-    </div>
+  const filteredUsers = allUsers.filter((u) =>
+    userFilter ? (u.nickname ?? "").includes(userFilter) || (u.area_code ?? "").includes(userFilter) : true
   );
-
-  return (
-    <div className="min-h-screen bg-gray-50">
-      {Header}
-      {view === 'home' && <HomeList users={sortedUsers} onOpen={(u) => { setSelected(u); setView('detail'); }} />}
-      {view === 'detail' && selected && <ProfileDetail user={selected} onPropose={() => setView('proposal')} onChat={() => setView('chat')} />}
-      {view === 'proposal' && <ProposalEditor proposal={proposal} setProposal={setProposal} onSend={() => setView('chat')} />}
-      {view === 'chat' && (
-        <ChatView
-          user={selected}
-          messages={messages}
-          input={input}
-          setInput={setInput}
-          onSend={() => {
-            if (!input.trim()) return;
-            setMessages([...messages, { who: 'me', text: input }]);
-            setInput('');
-          }}
-          onAgree={() => setView('summary')}
-        />
-      )}
-      {view === 'summary' && <SummaryCard user={selected} proposal={proposal} onCalendar={() => alert('端末カレンダー登録のモック')} />}
-      {view === 'availability' && <Availability onBack={() => setView('home')} supaUser={supaUser} />}
-      {view === 'register' && <RegisterPage />}
-      {view === 'profile' && (
-        <ProfileEditor
-          loading={loadingProfile}
-          profile={profile}
-          onSave={async (next) => {
-            if (!supaUser) return;
-            const { error } = await supabase.from('profiles').upsert({
-              user_id: supaUser.id,
-              nickname: next.nickname,
-              level: next.level,
-              area_code: next.area_code,
-              gender: next.gender,
-              hand: next.hand,
-              play_style: next.play_style,
-              bio: next.bio,
-              avatar_url: next.avatar_url,
-              years: next.years ?? null,
-              purpose: next.purpose ?? null,
-            });
-            if (error) {
-              alert('保存に失敗しました: ' + error.message);
-            } else {
-              setProfile((prev) => ({
-                user_id: supaUser!.id,
-                nickname: next.nickname ?? prev?.nickname ?? null,
-                level:    next.level    ?? prev?.level    ?? null,
-                area_code: next.area_code ?? prev?.area_code ?? null,
-                // 既存の詳細属性は「前の値を保持」
-                gender:     prev?.gender ?? null,
-                hand:       prev?.hand ?? null,
-                play_style: prev?.play_style ?? null,
-                bio:        prev?.bio ?? null,
-                avatar_url: prev?.avatar_url ?? null,
-                // 新規追加の2項目も保持
-                years:   prev?.years ?? null,
-                purpose: prev?.purpose ?? null,
-              }));
-              alert('保存しました');
-              setView('home');
-            }
-          }}
-          onCancel={() => setView('home')}
-          onDeleteAccount={handleDeleteAccount}
-        />
-      )}
-    </div>
-  );
-}
-import dynamic from 'next/dynamic';
-export default dynamic(() => Promise.resolve(App), { ssr: false });
-
-function LoginButtons() {
-  const [email, setEmail] = useState('');
-  const [sending, setSending] = useState(false);
-  return (
-    <div className="flex items-center gap-2">
-      <Input placeholder="メールでログイン（Magic Link）" value={email} onChange={(e) => setEmail(e.target.value)} className="w-[240px]" />
-      <Button
-        disabled={sending || !email}
-        onClick={async () => {
-          setSending(true);
-          window.localStorage?.setItem('fromRegister', '1');
-          const { error } = await supabase.auth.signInWithOtp({ email, options: { emailRedirectTo: window.location.origin } });
-          setSending(false);
-          if (error) alert('送信失敗: ' + error.message);
-          else alert('ログイン用リンクを送信しました。メールをご確認ください。');
-        }}
-      >
-        送信
-      </Button>
-      <Button
-        variant="secondary"
-        onClick={async () => {
-          window.localStorage?.setItem('fromRegister', '1');
-          const { error } = await supabase.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: window.location.origin } });
-          if (error) alert('Googleログイン失敗: ' + error.message);
-        }}
-      >
-        Googleでログイン
-      </Button>
-    </div>
-  );
-}
-
-function HomeList({ users, onOpen }: { users: UserRow[]; onOpen: (u: UserRow) => void }) {
-  return (
-    <div className="max-w-3xl mx-auto p-4">
-      <Tabs defaultValue="recommend">
-        <TabsList>
-          <TabsTrigger value="recommend">おすすめ</TabsTrigger>
-          <TabsTrigger value="near">近い順</TabsTrigger>
-          <TabsTrigger value="level">レベル近い順</TabsTrigger>
-        </TabsList>
-        <TabsContent value="recommend">
-          <div className="grid gap-4 mt-4">
-            {users.map((u: UserRow) => (
-              <Card key={u.id} className="shadow-sm">
-                <CardContent className="p-4">
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <div className="font-semibold flex items-center gap-2">
-                        {u.name}（{u.level}）
-                        <span className="inline-flex items-center text-sm opacity-80"><Star className="h-4 w-4 mr-1" />{u.rating}</span>
-                      </div>
-                      <div className="text-sm opacity-80">戦型: {u.style}｜年数: {u.years}年｜目的: {u.prefs.join('・')}</div>
-                      <div className="flex items-center gap-3 mt-2 text-sm">
-                        <span className="inline-flex items-center"><Clock className="h-4 w-4 mr-1" />{u.slot}</span>
-                        <span className="inline-flex items-center"><MapPin className="h-4 w-4 mr-1" />徒歩{u.distanceMinWalk}分</span>
-                        <Badge>相性 87</Badge>
-                      </div>
-                    </div>
-                    <div className="flex gap-2">
-                      <Button variant="secondary" onClick={() => onOpen(u)}>詳細</Button>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
-          </div>
-        </TabsContent>
-      </Tabs>
-    </div>
-  );
-}
-
-function FilterSheet({ filters, setFilters }: { filters: Filters; setFilters: React.Dispatch<React.SetStateAction<Filters>> }) {
-  const practiceOptions = ['多球', 'サーブ', 'ゲーム', '基礎'];
-  return (
-    <Sheet>
-      <SheetTrigger asChild>
-        <Button variant="outline"><Filter className="h-4 w-4 mr-1" />フィルタ</Button>
-      </SheetTrigger>
-      <SheetContent>
-        <SheetHeader>
-          <SheetTitle>フィルタ</SheetTitle>
-        </SheetHeader>
-        <div className="space-y-6 mt-4">
-          <div>
-            <div className="text-sm mb-2">距離 (km)</div>
-            <Slider defaultValue={[filters.distance]} max={20} step={1} onValueChange={(v) => setFilters({ ...filters, distance: v[0] })} />
-          </div>
-          <div>
-            <div className="text-sm mb-2">レベル差 許容</div>
-            <Select value={String(filters.levelDiff)} onValueChange={(v) => setFilters({ ...filters, levelDiff: Number(v) })}>
-              <SelectTrigger className="w-[120px]"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="0">±0</SelectItem>
-                <SelectItem value="1">±1</SelectItem>
-                <SelectItem value="2">±2</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div>
-            <div className="text-sm mb-2">目的</div>
-            <div className="flex gap-2 flex-wrap">
-              {practiceOptions.map((p: string) => (
-                <Badge
-                  key={p}
-                  variant={filters.prefs.includes(p) ? 'default' : 'secondary'}
-                  className="cursor-pointer"
-                  onClick={() => {
-                    const exists = filters.prefs.includes(p);
-                    setFilters({
-                      ...filters,
-                      prefs: exists ? filters.prefs.filter((x: string) => x !== p) : [...filters.prefs, p],
-                    });
-                  }}
-                >
-                  {p}
-                </Badge>
-              ))}
-            </div>
-          </div>
-          <div className="flex gap-2">
-            <Button variant="secondary" onClick={() => setFilters({ distance: 5, levelDiff: 1, times: ['平日夜'], prefs: ['多球', 'ゲーム'] })}>クリア</Button>
-            <Button onClick={() => (document.activeElement as HTMLElement)?.blur()}>適用</Button>
-          </div>
-        </div>
-      </SheetContent>
-    </Sheet>
-  );
-}
-
-function ProfileDetail({ user, onPropose, onChat }: { user: UserRow; onPropose: () => void; onChat: () => void }) {
-  return (
-    <div className="max-w-2xl mx-auto p-4 space-y-4">
-      <Card className="shadow-sm">
-        <CardContent className="p-4 space-y-2">
-          <div className="flex items-center justify-between">
-            <div className="font-semibold">{user.name}（{user.level}）</div>
-            <div className="text-sm inline-flex items-center opacity-80"><Star className="h-4 w-4 mr-1" />{user.rating}</div>
-          </div>
-          <div className="text-sm opacity-80">利き手: 右 / 戦型: {user.style} / 年数: {user.years}年</div>
-          <div className="text-sm">エリア: {user.area} / 目的: {user.prefs.join('・')}</div>
-          <div className="text-sm">自己紹介: {user.intro}</div>
-          <div className="flex gap-2 pt-2">
-            <Badge variant="secondary">共通: {user.slot}</Badge>
-            <Badge>相性 87</Badge>
-          </div>
-          <div className="flex gap-2 pt-3">
-            <Button onClick={onPropose}>提案を作る</Button>
-            <Button variant="secondary" onClick={onChat}><MessageSquare className="h-4 w-4 mr-1"/>チャット</Button>
-          </div>
-        </CardContent>
-      </Card>
-      <Card className="shadow-sm">
-        <CardContent className="p-4">
-          <div className="font-semibold mb-2">レビュー</div>
-          <ul className="list-disc ml-5 text-sm space-y-1">
-            <li>マナーが良い</li>
-            <li>多球うまい</li>
-          </ul>
-        </CardContent>
-      </Card>
-    </div>
-  );
-}
-
-function ChatView({ user, messages, input, setInput, onSend, onAgree }: { user: UserRow; messages: { who: 'me' | 'partner'; text: string }[]; input: string; setInput: (v: string) => void; onSend: () => void; onAgree: () => void }) {
-  return (
-    <div className="max-w-2xl mx-auto p-4">
-      <div className="text-sm opacity-70 mb-2">相手: {user.name}（{user.level}）</div>
-      <div className="border rounded-lg bg-white p-4 h-[360px] overflow-y-auto space-y-3">
-        {messages.map((m, i) => (
-          <div key={i} className={m.who === 'me' ? 'flex justify-end' : 'flex justify-start'}>
-            <div className={m.who === 'me' ? 'rounded-2xl px-3 py-2 text-sm bg-gray-900 text-white' : 'rounded-2xl px-3 py-2 text-sm bg-gray-100'}>{m.text}</div>
-          </div>
-        ))}
-      </div>
-      <div className="flex items-center gap-2 mt-3">
-        <Input placeholder="メッセージ…" value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') onSend(); }} />
-        <Button onClick={onSend}>送信</Button>
-        <Button variant="secondary" onClick={onAgree}><CheckCircle2 className="h-4 w-4 mr-1"/>合意する</Button>
-      </div>
-    </div>
-  );
-}
-
-function ProposalEditor({ proposal, setProposal, onSend }: { proposal: { datetime: string; place: string; memo: string }; setProposal: (v: { datetime: string; place: string; memo: string }) => void; onSend: () => void }) {
-  return (
-    <div className="max-w-xl mx-auto p-4 space-y-3">
-      <div className="text-lg font-semibold">提案を作る</div>
-      <div className="space-y-2">
-        <div className="text-sm">日時</div>
-        <Input value={proposal.datetime} onChange={(e) => setProposal({ ...proposal, datetime: e.target.value })} />
-      </div>
-      <div className="space-y-2">
-        <div className="text-sm">場所</div>
-        <Input value={proposal.place} onChange={(e) => setProposal({ ...proposal, place: e.target.value })} />
-      </div>
-      <div className="space-y-2">
-        <div className="text-sm">メモ</div>
-        <Textarea value={proposal.memo} onChange={(e) => setProposal({ ...proposal, memo: e.target.value })} />
-      </div>
-      <div className="pt-2">
-        <Button onClick={onSend}>送信</Button>
-      </div>
-    </div>
-  );
-}
-
-function SummaryCard({ user, proposal, onCalendar }: { user: UserRow; proposal: { datetime: string; place: string; memo: string }; onCalendar: () => void }) {
-  return (
-    <div className="max-w-xl mx-auto p-6">
-      <Card className="shadow-sm">
-        <CardContent className="p-6 text-center space-y-2">
-          <CheckCircle2 className="h-8 w-8 mx-auto" />
-          <div className="text-lg font-semibold">合意が成立しました！</div>
-          <div className="text-sm">相手: {user.name}（{user.level}）｜相性: 87</div>
-          <div className="text-sm">日時: {proposal.datetime}</div>
-          <div className="text-sm">場所: {proposal.place}</div>
-          <div className="flex gap-2 justify-center pt-3">
-            <Button onClick={onCalendar}>端末カレンダーに追加</Button>
-            <Button variant="secondary">リマインドを受け取る</Button>
-          </div>
-        </CardContent>
-      </Card>
-    </div>
-  );
-}
-
-function RegisterPage() {
-  return (
-    <div className="max-w-xl mx-auto p-6 space-y-4">
-      <div className="text-xl font-semibold">会員登録</div>
-      <div className="text-sm opacity-80">以下のいずれかの方法で登録できます。登録後にプロフィールを設定します。</div>
-      <Card className="shadow-sm">
-        <CardContent className="p-4 space-y-3">
-          <div className="text-sm font-medium">登録方法</div>
-          <LoginButtons />
-          <div className="text-xs opacity-70">※ Google でも登録できます。Magic Link はメールに届くリンクをクリックして完了します。</div>
-        </CardContent>
-      </Card>
-      <Card className="shadow-sm">
-        <CardContent className="p-4 space-y-2 text-xs opacity-70">
-          <div>・登録後は「プロフィール編集」画面が開きます。ニックネーム/レベル/エリアを設定してください。</div>
-          <div>・利用規約/プライバシーポリシーに同意のうえご利用ください。</div>
-        </CardContent>
-      </Card>
-    </div>
-  );
-}
-
-function Availability({ onBack, supaUser }: { onBack: () => void; supaUser: SupaUser | null }) {
-  const [slots, setSlots] = useState<SlotRow[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
-
-  // 追加/編集フォーム用のローカル状態
-  const [start, setStart] = useState<string>(''); // datetime-local
-  const [end, setEnd] = useState<string>('');
-  const [area, setArea] = useState<string>('yokohama');
-  const [venue, setVenue] = useState<string>('');
-
-  // 編集行の管理
-  const [editId, setEditId] = useState<number | null>(null);
-  const [editStart, setEditStart] = useState<string>('');
-  const [editEnd, setEditEnd] = useState<string>('');
-  const [editArea, setEditArea] = useState<string>('yokohama');
-  const [editVenue, setEditVenue] = useState<string>('');
 
   useEffect(() => {
-    if (!supaUser?.id) return;
-    (async () => {
-      setLoading(true);
-      const { data, error } = await supabase
-        .from('availability_slots')
-        .select('id,user_id,start_at,end_at,area_code,venue_hint,is_recurring,created_at')
-        .eq('user_id', supaUser.id)
-        .order('start_at', { ascending: true });
-      if (error) console.error('load slots error', error);
-      setSlots((data ?? []) as SlotRow[]);
-      setLoading(false);
-    })();
-  }, [supaUser?.id]); // ★ ここを supaUser から supaUser?.id に
-
-  // 表示用
-  function fmt(dt: string) {
-    if (!dt) return '';
-    const d = new Date(dt);
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const dd = String(d.getDate()).padStart(2, '0');
-    const hh = String(d.getHours()).padStart(2, '0');
-    const mm = String(d.getMinutes()).padStart(2, '0');
-    return `${y}/${m}/${dd} ${hh}:${mm}`;
-  }
-  // ISO -> input(datetime-local)
-  function toInput(dt: string) {
-    if (!dt) return '';
-    const d = new Date(dt);
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const dd = String(d.getDate()).padStart(2, '0');
-    const hh = String(d.getHours()).padStart(2, '0');
-    const mm = String(d.getMinutes()).padStart(2, '0');
-    return `${y}-${m}-${dd}T${hh}:${mm}`;
-  }
-
-  async function addSlot() {
-    if (!supaUser) { alert('ログインしてください'); return; }
-    if (!start || !end) { alert('開始/終了を入力してください'); return; }
-    const startIso = new Date(start).toISOString();
-    const endIso = new Date(end).toISOString();
-    if (new Date(endIso) <= new Date(startIso)) { alert('終了は開始より後にしてください'); return; }
-
-    setSaving(true);
-    const { data, error } = await supabase
-      .from('availability_slots')
-      .insert({
-        user_id: supaUser.id,
-        start_at: startIso,
-        end_at: endIso,
-        area_code: area,
-        venue_hint: venue || null,
-        is_recurring: false,
-      })
-      .select();
-    setSaving(false);
-
-    if (error) { alert('追加に失敗: ' + error.message); return; }
-    setSlots([...(slots ?? []), ...(data as SlotRow[])]);
-    setStart(''); setEnd(''); setVenue('');
-  }
-
-  async function removeSlot(id: number) {
-    if (!confirm('このスロットを削除しますか？')) return;
-    const { error } = await supabase.from('availability_slots').delete().eq('id', id);
-    if (error) { alert('削除に失敗: ' + error.message); return; }
-    setSlots(slots.filter(s => s.id !== id));
-  }
-
-  function beginEdit(s: SlotRow) {
-    setEditId(s.id);
-    setEditStart(toInput(s.start_at));
-    setEditEnd(toInput(s.end_at));
-    setEditArea(s.area_code ?? 'yokohama');
-    setEditVenue(s.venue_hint ?? '');
-  }
-  function cancelEdit() {
-    setEditId(null);
-    setEditStart('');
-    setEditEnd('');
-    setEditArea('yokohama');
-    setEditVenue('');
-  }
-  async function saveEdit() {
-    if (!supaUser || editId === null) return;
-    if (!editStart || !editEnd) { alert('開始/終了を入力してください'); return; }
-    const startIso = new Date(editStart).toISOString();
-    const endIso = new Date(editEnd).toISOString();
-    if (new Date(endIso) <= new Date(startIso)) { alert('終了は開始より後にしてください'); return; }
-
-    setSaving(true);
-    const { error } = await supabase
-      .from('availability_slots')
-      .update({
-        start_at: startIso,
-        end_at: endIso,
-        area_code: editArea,
-        venue_hint: editVenue || null,
-      })
-      .eq('id', editId);
-    setSaving(false);
-
-    if (error) { alert('更新に失敗: ' + error.message); return; }
-    setSlots(slots.map(s => s.id === editId ? { ...s, start_at: startIso, end_at: endIso, area_code: editArea, venue_hint: editVenue || null } : s));
-    cancelEdit();
-  }
-
-  if (!supaUser) {
-    return (
-      <div className="max-w-xl mx-auto p-4 space-y-4">
-        <div className="text-lg font-semibold">可用時間</div>
-        <div className="text-sm text-red-600">ログインすると可用時間を編集できます。</div>
-        <div><Button onClick={onBack}>戻る</Button></div>
-      </div>
-    );
-  }
+    return () => {
+      try { chatChannelRef.current?.unsubscribe(); } catch {}
+    };
+  }, []);
 
   return (
-    <div className="max-w-xl mx-auto p-4 space-y-4">
-      <div className="text-lg font-semibold">可用時間</div>
+    <main style={{ maxWidth: 1100, margin: "24px auto", padding: "0 16px" }}>
+      <h1>卓球マッチング Webプロト — Stage 3: Matches & Messages</h1>
 
-      {/* 追加フォーム */}
-      <Card className="shadow-sm">
-        <CardContent className="p-4 space-y-3">
-          <div className="text-sm font-medium">スロットを追加</div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div>
-              <div className="text-xs mb-1">開始</div>
-              <Input type="datetime-local" value={start} onChange={(e) => setStart(e.target.value)} />
+      {!user ? (
+        <section style={{ marginTop: 16 }}>
+          <p>ログインしてください。</p>
+
+          {/* OAuth */}
+          <button onClick={handleGoogleLogin} disabled={busy} style={{ padding: "8px 12px" }}>
+            Googleでログイン
+          </button>
+
+          {/* Magic Link */}
+          <div style={{ marginTop: 12, padding: 12, border: "1px solid #eee", borderRadius: 8 }}>
+            <div style={{ marginBottom: 6, fontWeight: 600 }}>または、メールでログイン（Magic Link）</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input
+                type="email"
+                placeholder="you@example.com"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                style={{ flex: 1 }}
+              />
+              <button onClick={handleSendMagicLink} disabled={busy || !email.trim()} style={{ padding: "8px 12px" }}>
+                リンクを送る
+              </button>
             </div>
-            <div>
-              <div className="text-xs mb-1">終了</div>
-              <Input type="datetime-local" value={end} onChange={(e) => setEnd(e.target.value)} />
-            </div>
-            <div>
-              <div className="text-xs mb-1">エリア</div>
-              <Select value={area} onValueChange={(v) => setArea(v)}>
-                <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="yokohama">横浜駅±5km</SelectItem>
-                  <SelectItem value="shinagawa">品川駅±5km</SelectItem>
-                  <SelectItem value="tokyo">東京駅±5km</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <div className="text-xs mb-1">会場メモ</div>
-              <Input placeholder="○○卓球場 第2卓 など" value={venue} onChange={(e) => setVenue(e.target.value)} />
-            </div>
+            {emailSent && <div style={{ marginTop: 8, color: "#0a0" }}>送信しました。メール内のリンクをクリックしてください。</div>}
           </div>
-          <div className="pt-1">
-            <Button onClick={addSlot} disabled={saving}>追加</Button>
-          </div>
-        </CardContent>
-      </Card>
 
-      {/* 一覧＋編集 */}
-      <Card className="shadow-sm">
-        <CardContent className="p-4">
-          <div className="text-sm font-medium mb-2">登録済みスロット</div>
-          {loading ? (
-            <div>読み込み中...</div>
-          ) : slots.length === 0 ? (
-            <div className="text-sm opacity-70">まだ登録がありません</div>
-          ) : (
-            <div className="space-y-2">
-              {slots.map((s) => (
-                <div key={s.id} className="border rounded-lg p-2 bg-white">
-                  {editId === s.id ? (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-end">
-                      <div>
-                        <div className="text-xs mb-1">開始</div>
-                        <Input type="datetime-local" value={editStart} onChange={(e) => setEditStart(e.target.value)} />
-                      </div>
-                      <div>
-                        <div className="text-xs mb-1">終了</div>
-                        <Input type="datetime-local" value={editEnd} onChange={(e) => setEditEnd(e.target.value)} />
-                      </div>
-                      <div>
-                        <div className="text-xs mb-1">エリア</div>
-                        <Select value={editArea} onValueChange={(v) => setEditArea(v)}>
-                          <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="yokohama">横浜駅±5km</SelectItem>
-                            <SelectItem value="shinagawa">品川駅±5km</SelectItem>
-                            <SelectItem value="tokyo">東京駅±5km</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <div>
-                        <div className="text-xs mb-1">会場メモ</div>
-                        <Input value={editVenue} onChange={(e) => setEditVenue(e.target.value)} />
-                      </div>
-                      <div className="flex gap-2">
-                        <Button onClick={saveEdit} disabled={saving}>保存</Button>
-                        <Button variant="secondary" onClick={cancelEdit}>キャンセル</Button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="flex items-center justify-between">
-                      <div className="text-sm">
-                        <div>{fmt(s.start_at)} - {fmt(s.end_at)}</div>
-                        <div className="opacity-70">エリア: {s.area_code ?? '-'}／会場: {s.venue_hint ?? '-'}</div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Badge variant="secondary">ID {s.id}</Badge>
-                        <Button variant="secondary" onClick={() => beginEdit(s)}>編集</Button>
-                        <Button variant="secondary" onClick={() => removeSlot(s.id)}>削除</Button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      <div className="pt-2">
-        <Button onClick={onBack}>戻る</Button>
-      </div>
-    </div>
-  );
-}
-
-// 拡張版プロフィールエディタ
-function ProfileEditor({
-  loading,
-  profile,
-  onSave,
-  onCancel,
-  onDeleteAccount,
-}: {
-  loading: boolean;
-  profile: ProfileRow | null;
-  onSave: (p: {
-    nickname: string | null;
-    level: number | null;
-    area_code: string | null;
-    gender?: 'male' | 'female' | 'other' | null;
-    hand?: 'right' | 'left' | null;
-    play_style?: string | null;
-    bio?: string | null;
-    avatar_url?: string | null;
-    years?: number | null;
-    purpose?: string[] | null;
-  }) => void;
-  onCancel: () => void;
-  onDeleteAccount?: () => void;
-}) {
-
-  const [nickname, setNickname] = useState(profile?.nickname ?? '');
-  const [level, setLevel] = useState<number>(profile?.level ?? 3);
-  const [area, setArea] = useState<string>(profile?.area_code ?? 'yokohama');
-  const [years, setYears] = useState<number>(profile?.years ?? 0);
-  const [purpose, setPurpose] = useState<string[]>(profile?.purpose ?? []);
-  const practiceOptions = ['多球', 'サーブ', 'ゲーム', '基礎'];
-
-  // 追加フィールド（空文字は使わず 'unset' を採用）
-  const [gender, setGender] = useState<'unset' | 'male' | 'female' | 'other'>(
-    (profile?.gender ?? 'unset') as 'unset' | 'male' | 'female' | 'other'
-  );
-  const [hand, setHand] = useState<'unset' | 'right' | 'left'>(
-    (profile?.hand ?? 'unset') as 'unset' | 'right' | 'left'
-  );
-  const [playStyle, setPlayStyle] = useState<string>(profile?.play_style ?? 'unset');
-  const [bio, setBio] = useState<string>(profile?.bio ?? '');
-  const [avatarUrl, setAvatarUrl] = useState<string>(profile?.avatar_url ?? '');
-
-  useEffect(() => {
-    setNickname(profile?.nickname ?? '');
-    setLevel(profile?.level ?? 3);
-    setArea(profile?.area_code ?? 'yokohama');
-    setGender((profile?.gender ?? 'unset') as 'unset' | 'male' | 'female' | 'other');
-    setHand((profile?.hand ?? 'unset') as 'unset' | 'right' | 'left');
-    setPlayStyle(profile?.play_style ?? 'unset');
-    setBio(profile?.bio ?? '');
-    setAvatarUrl(profile?.avatar_url ?? '');
-    setYears(profile?.years ?? 0);
-    setPurpose(profile?.purpose ?? []);
-  }, [profile]);
-
-  return (
-    <div className="max-w-xl mx-auto p-4 space-y-4">
-      <div className="text-lg font-semibold">プロフィール編集</div>
-      {loading ? (
-        <div>読み込み中…</div>
+          {msg && <p style={{ marginTop: 8, color: "crimson", whiteSpace: "pre-wrap" }}>{msg}</p>}
+        </section>
       ) : (
         <>
-          {/* 基本 */}
-          <div className="space-y-2">
-            <div className="text-sm">ニックネーム</div>
-            <Input value={nickname ?? ''} onChange={(e) => setNickname(e.target.value)} />
-          </div>
+          <section style={{ marginTop: 16 }}>
+            <p><strong>ログイン中:</strong> {user.email ?? user.id}</p>
+            {msg && <p style={{ marginTop: 8, color: msg.includes("失敗") ? "crimson" : "green" }}>{msg}</p>}
+            <button onClick={handleLogout} disabled={busy} style={{ padding: "6px 10px" }}>ログアウト</button>
+          </section>
 
-          <div className="space-y-2">
-            <div className="text-sm">レベル（1 最弱 〜 6 最強）</div>
-            <Select value={String(level)} onValueChange={(v) => setLevel(Number(v))}>
-              <SelectTrigger className="w-[160px]"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="1">1</SelectItem>
-                <SelectItem value="2">2</SelectItem>
-                <SelectItem value="3">3</SelectItem>
-                <SelectItem value="4">4</SelectItem>
-                <SelectItem value="5">5</SelectItem>
-                <SelectItem value="6">6</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="space-y-2">
-            <div className="text-sm">活動エリア</div>
-            <Select value={area} onValueChange={(v) => setArea(v)}>
-              <SelectTrigger className="w-[200px]"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="yokohama">横浜駅±5km</SelectItem>
-                <SelectItem value="shinagawa">品川駅±5km</SelectItem>
-                <SelectItem value="tokyo">東京駅±5km</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-
-          {/* 追加フィールド */}
-          <div className="space-y-2">
-            <div className="text-sm">性別</div>
-            <Select
-              value={gender}
-              onValueChange={(v) => setGender(v as 'unset' | 'male' | 'female' | 'other')}
-            >
-              <SelectTrigger className="w-[200px]"><SelectValue placeholder="未設定" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="unset">未設定</SelectItem>
-                <SelectItem value="male">男性</SelectItem>
-                <SelectItem value="female">女性</SelectItem>
-                <SelectItem value="other">その他</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="space-y-2">
-            <div className="text-sm">利き手</div>
-            <Select
-              value={hand}
-              onValueChange={(v) => setHand(v as 'unset' | 'right' | 'left')}
-            >
-              <SelectTrigger className="w-[200px]"><SelectValue placeholder="未設定" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="unset">未設定</SelectItem>
-                <SelectItem value="right">右</SelectItem>
-                <SelectItem value="left">左</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="space-y-2">
-            <div className="text-sm">戦型</div>
-            <Select value={playStyle} onValueChange={(v) => setPlayStyle(v)}>
-              <SelectTrigger className="w-[220px]"><SelectValue placeholder="未設定" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="unset">未設定</SelectItem>
-                <SelectItem value="shake_drive">シェーク/ドライブ</SelectItem>
-                <SelectItem value="pen_fast">ペン/前陣速攻</SelectItem>
-                <SelectItem value="chopper">カットマン</SelectItem>
-                <SelectItem value="two_wing">両ハンドドライブ</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-
-          {/* ここまでが既存: 活動エリア */}
-
-          {/* 追加1: 卓球経験年数 */}
-          <div className="space-y-2">
-            <div className="text-sm">卓球歴（年数）</div>
-            <div className="flex items-center gap-3">
-              <Select
-                value={String(years)}
-                onValueChange={(v) => setYears(Number(v))}
-              >
-                <SelectTrigger className="w-[160px]">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="0">0 年（はじめたばかり）</SelectItem>
-                  <SelectItem value="1">1 年</SelectItem>
-                  <SelectItem value="2">2 年</SelectItem>
-                  <SelectItem value="3">3 年</SelectItem>
-                  <SelectItem value="4">4 年</SelectItem>
-                  <SelectItem value="5">5 年</SelectItem>
-                  <SelectItem value="6">6 年</SelectItem>
-                  <SelectItem value="7">7 年</SelectItem>
-                  <SelectItem value="8">8 年</SelectItem>
-                  <SelectItem value="9">9 年</SelectItem>
-                  <SelectItem value="10">10 年以上</SelectItem>
-                </SelectContent>
-              </Select>
-              <div className="text-xs opacity-70">※ ざっくりでOK</div>
+          {/* Profile */}
+          <section style={{ marginTop: 24, padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
+            <h2 style={{ marginTop: 0 }}>プロフィール編集</h2>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <label style={{ display: "flex", flexDirection: "column" }}>ニックネーム
+                <input value={nickname} onChange={(e) => setNickname(e.target.value)} />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column" }}>レベル（数値）
+                <input type="number" value={level} onChange={(e) => setLevel(e.target.value === "" ? "" : Number(e.target.value))} />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column" }}>エリアコード
+                <input value={areaCode} onChange={(e) => setAreaCode(e.target.value)} />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column" }}>性別
+                <select value={gender as string | ""} onChange={(e) => setGender((e.target.value || "") as Gender | "")}>
+                  <option value="">未設定</option><option value="male">male</option><option value="female">female</option><option value="other">other</option>
+                </select>
+              </label>
+              <label style={{ display: "flex", flexDirection: "column" }}>利き手
+                <select value={hand as string | ""} onChange={(e) => setHand((e.target.value || "") as Hand | "")}>
+                  <option value="">未設定</option><option value="right">right</option><option value="left">left</option>
+                </select>
+              </label>
+              <label style={{ display: "flex", flexDirection: "column" }}>プレースタイル
+                <select value={playingStyle as string | ""} onChange={(e) => setPlayingStyle((e.target.value || "") as PlayingStyle | "")}>
+                  <option value="">未設定</option><option value="shake">shake</option><option value="pen">pen</option><option value="others">others</option>
+                </select>
+              </label>
+              <label style={{ display: "flex", flexDirection: "column" }}>経験年数（数値）
+                <input type="number" value={years} onChange={(e) => setYears(e.target.value === "" ? "" : Number(e.target.value))} />
+              </label>
+              <label style={{ gridColumn: "1 / span 2", display: "flex", flexDirection: "column" }}>目的（カンマ区切り）
+                <input placeholder="ラリー, 試合, フットワーク練習 など" value={purpose} onChange={(e) => setPurpose(e.target.value)} />
+              </label>
+              <label style={{ gridColumn: "1 / span 2", display: "flex", flexDirection: "column" }}>アバターURL
+                <input value={avatarUrl} onChange={(e) => setAvatarUrl(e.target.value)} />
+              </label>
             </div>
-          </div>
-
-          {/* 追加2: 目的（複数選択可） */}
-          <div className="space-y-2">
-            <div className="text-sm">目的（複数選択可）</div>
-            <div className="flex gap-2 flex-wrap">
-              {practiceOptions.map((p) => {
-                const active = purpose.includes(p);
-                return (
-                  <Badge
-                    key={p}
-                    variant={active ? 'default' : 'secondary'}
-                    className="cursor-pointer"
-                    onClick={() =>
-                      setPurpose((prev) =>
-                        prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]
-                      )
-                    }
-                  >
-                    {p}
-                  </Badge>
-                );
-              })}
+            <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
+              <button onClick={handleSaveProfile} disabled={busy} style={{ padding: "8px 12px" }}>保存</button>
             </div>
-          </div>
+          </section>
 
-          <div className="space-y-2">
-            <div className="text-sm">自己紹介（最大500文字）</div>
-            <Textarea
-              value={bio}
-              onChange={(e) => setBio(e.target.value.slice(0, 500))}
-              placeholder="例：週2回練習。ゲーム/多球歓迎。台の確保可など"
-            />
-            <div className="text-xs opacity-60 text-right">{bio.length}/500</div>
-          </div>
-
-          <div className="space-y-2">
-            <div className="text-sm">プロフィール画像（URL）</div>
-            <Input
-              value={avatarUrl}
-              onChange={(e) => setAvatarUrl(e.target.value)}
-              placeholder="例：https://..."
-            />
-            <div className="text-xs opacity-60">※ 画像アップロードは後で実装予定。まずは URL で表示します。</div>
-          </div>
-
-          {/* アクション */}
-          <div className="flex gap-2 pt-2">
-            <Button
-              onClick={() =>
-                onSave({
-                  nickname,
-                  level,
-                  area_code: area,
-                  gender: gender === 'unset' ? null : gender,
-                  hand: hand === 'unset' ? null : hand,
-                  play_style: playStyle === 'unset' ? null : playStyle,
-                  bio: bio || null,
-                  avatar_url: avatarUrl || null,
-                  // ↓↓↓ 足す（stateが無ければ profile?.years / profile?.purpose を使ってOK）
-                  years: typeof years === 'number' ? years : (profile?.years ?? null),
-                  purpose: Array.isArray(purpose) ? purpose : (profile?.purpose ?? null),
-                })
-              }
-            >
-              保存
-            </Button>
-            <Button variant="secondary" onClick={onCancel}>キャンセル</Button>
-          </div>
-
-          {onDeleteAccount && (
-            <div className="pt-3">
-              <Button variant="destructive" onClick={onDeleteAccount}>
-                退会する（データ削除）
-              </Button>
+          {/* Availability */}
+          <section style={{ marginTop: 24, padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
+            <h2 style={{ marginTop: 0 }}>空き時間（availability）</h2>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <label style={{ display: "flex", flexDirection: "column" }}>開始日時
+                <input type="datetime-local" value={startAt} onChange={(e) => setStartAt(e.target.value)} />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column" }}>終了日時
+                <input type="datetime-local" value={endAt} onChange={(e) => setEndAt(e.target.value)} />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column" }}>エリアコード
+                <input value={slotArea} onChange={(e) => setSlotArea(e.target.value)} />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column" }}>会場メモ
+                <input value={venueHint} onChange={(e) => setVenueHint(e.target.value)} />
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <input type="checkbox" checked={isRecurring} onChange={(e) => setIsRecurring(e.target.checked)} />繰り返し
+              </label>
             </div>
-          )}
+            <div style={{ marginTop: 12 }}>
+              <button onClick={handleAddSlot} disabled={busy} style={{ padding: "8px 12px" }}>追加</button>
+            </div>
+            <div style={{ marginTop: 16 }}>
+              {slots.length === 0 ? <p>まだ登録がありません。</p> : (
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead><tr>
+                    <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>開始</th>
+                    <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>終了</th>
+                    <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>エリア</th>
+                    <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>会場メモ</th>
+                    <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>繰り返し</th>
+                    <th style={{ borderBottom: "1px solid #ddd" }}></th>
+                  </tr></thead>
+                  <tbody>
+                    {slots.map((s) => (
+                      <tr key={String(s.id)}>
+                        <td style={{ padding: 6 }}>{fmtDate(s.start_at)}</td>
+                        <td style={{ padding: 6 }}>{fmtDate(s.end_at)}</td>
+                        <td style={{ padding: 6 }}>{s.area_code}</td>
+                        <td style={{ padding: 6 }}>{s.venue_hint ?? ""}</td>
+                        <td style={{ padding: 6 }}>{s.is_recurring ? "Yes" : "No"}</td>
+                        <td style={{ padding: 6 }}>
+                          <button onClick={() => handleDeleteSlot(s.id!)} disabled={busy || s.id == null}>削除</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </section>
+
+          {/* Propose & Matches */}
+          <section style={{ marginTop: 24, padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
+            <h2 style={{ marginTop: 0 }}>相手を探して提案</h2>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 12 }}>
+              <label style={{ display: "flex", flexDirection: "column" }}>開始（提案）
+                <input type="datetime-local" value={proposalStart} onChange={(e)=>setProposalStart(e.target.value)} />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column" }}>終了（提案）
+                <input type="datetime-local" value={proposalEnd} onChange={(e)=>setProposalEnd(e.target.value)} />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column" }}>会場候補
+                <input value={proposalVenue} onChange={(e)=>setProposalVenue(e.target.value)} />
+              </label>
+            </div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+              <input placeholder="ニックネーム/エリアで絞り込み" value={userFilter} onChange={(e)=>setUserFilter(e.target.value)} />
+              <span style={{ color: "#666" }}>候補: {filteredUsers.length}人</span>
+            </div>
+            <div style={{ maxHeight: 220, overflow: "auto", border: "1px solid #eee", borderRadius: 8, padding: 8 }}>
+              {filteredUsers.length === 0 ? <p>候補が見つかりません。</p> : (
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead><tr>
+                    <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>ニックネーム</th>
+                    <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>エリア</th>
+                    <th style={{ borderBottom: "1px solid #ddd" }}></th>
+                  </tr></thead>
+                  <tbody>
+                    {filteredUsers.map(u => (
+                      <tr key={u.user_id}>
+                        <td style={{ padding: 6 }}>{u.nickname ?? u.user_id.slice(0,8)}</td>
+                        <td style={{ padding: 6 }}>{u.area_code ?? "-"}</td>
+                        <td style={{ padding: 6 }}>
+                          <button onClick={()=>handleProposeMatch(u.user_id)} disabled={busy}>提案</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </section>
+
+          {/* My Matches */}
+          <section style={{ marginTop: 24, padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
+            <h2 style={{ marginTop: 0 }}>自分のマッチ</h2>
+            {matches.length === 0 ? <p>まだマッチがありません。</p> : (
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead><tr>
+                  <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>相手</th>
+                  <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>開始</th>
+                  <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>終了</th>
+                  <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>会場</th>
+                  <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>ステータス</th>
+                  <th style={{ borderBottom: "1px solid #ddd" }}></th>
+                </tr></thead>
+                <tbody>
+                  {matches.map(m => {
+                    const opponentId = m.user_a === user!.id ? m.user_b : m.user_a; // string | null の可能性
+                    const opponent = opponentId ? allUsers.find(u => u.user_id === opponentId) : undefined;
+                    return (
+                      <tr key={String(m.id)}>
+                        <td style={{ padding: 6 }}>{opponent?.nickname ?? (opponentId ? opponentId.slice(0,8) : "-")}</td>
+                        <td style={{ padding: 6 }}>{fmtDate(m.start_at)}</td>
+                        <td style={{ padding: 6 }}>{fmtDate(m.end_at)}</td>
+                        <td style={{ padding: 6 }}>{m.venue_text ?? ""}</td>
+                        <td style={{ padding: 6 }}>{m.status}</td>
+                        <td style={{ padding: 6, display: "flex", gap: 6 }}>
+                          {m.status === "pending" && (
+                            <>
+                              <button onClick={()=>handleMatchStatus(m.id!, "confirmed")} disabled={busy || m.id == null}>承諾</button>
+                              <button onClick={()=>handleMatchStatus(m.id!, "cancelled")} disabled={busy || m.id == null}>辞退</button>
+                            </>
+                          )}
+                          <button onClick={()=>openChat(m.id!)} disabled={busy || m.id == null}>チャット</button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </section>
+
+          {/* Chat */}
+          <section style={{ marginTop: 24, padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
+            <h2 style={{ marginTop: 0 }}>チャット</h2>
+            {!activeMatchId ? (
+              <p>マッチの「チャット」を押すと、この下にスレッドが表示されます。</p>
+            ) : (
+              <div>
+                <div style={{ marginBottom: 8, display: "flex", gap: 8 }}>
+                  <button onClick={()=>activeMatchId != null && fetchMessages(activeMatchId)} disabled={busy}>更新</button>
+                  <button onClick={()=>{ try { chatChannelRef.current?.unsubscribe(); } catch {}; setActiveMatchId(null); }} disabled={busy}>閉じる</button>
+                </div>
+                <div style={{ maxHeight: 240, overflow: "auto", border: "1px solid #eee", borderRadius: 8, padding: 8 }}>
+                  {messages.length === 0 ? <p>メッセージはまだありません。</p> : (
+                    <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
+                      {messages.map((m) => (
+                        <li key={String(m.id)} style={{ padding: "6px 0", borderBottom: "1px dashed #eee" }}>
+                          <div style={{ fontSize: 12, color: "#666" }}>{fmtDate(m.sent_at)} — {m.sender_id === user!.id ? "あなた" : "相手"}</div>
+                          <div>{m.body}</div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
+                  <input value={chatBody} onChange={(e)=>setChatBody(e.target.value)} placeholder="メッセージを入力…" style={{ flex: 1 }} />
+                  <button onClick={handleSendMessage} disabled={busy || !chatBody.trim()}>送信</button>
+                </div>
+              </div>
+            )}
+          </section>
         </>
       )}
-    </div>
+
+      <hr style={{ margin: "24px 0" }} />
+      <p style={{ color: "#555" }}>※ Stage 3：matches/messages を使った提案＆チャット。RLS は「自分が当事者の match と messages のみ」読み書きできる想定です。</p>
+    </main>
   );
 }
