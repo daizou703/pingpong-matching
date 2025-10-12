@@ -229,6 +229,38 @@ export default function App() {
     return created;
   }
 
+    // --- account deletion (退会) ---
+async function handleDeleteAccount() {
+  if (!supaUser) return;
+  if (!confirm('退会します。プロフィールと可用時間などの登録情報を削除します。よろしいですか？この操作は元に戻せません。')) return;
+
+  const sb = getSupabase();
+  try {
+// 1) 可用時間を削除
+    const { error: errSlots } = await sb
+      .from('availability_slots')
+      .delete()
+      .eq('user_id', supaUser.id);
+    if (errSlots) throw errSlots;
+
+    // 2) プロフィールを削除（自分の1件想定。存在しない可能性もあるのでそのままOK）
+    const { error: errProf } = await sb
+      .from('profiles')
+      .delete()
+      .eq('user_id', supaUser.id);
+    if (errProf) throw errProf;
+
+    // 3) ローカル状態クリア → サインアウト → ホームへ
+    setProfile(null);
+    await handleLogout();
+    alert('退会処理が完了しました。ご利用ありがとうございました。');
+    setView('home');
+  } catch (e: unknown) {
+  const msg = e instanceof Error ? e.message : String(e);
+  console.error(msg);
+  }
+}
+
   const sortedUsers = useMemo(() => SAMPLE_USERS.slice().sort((a, b) => b.rating - a.rating), []);
 
   const Header = (
@@ -333,11 +365,13 @@ export default function App() {
             }
           }}
           onCancel={() => setView('home')}
+          onDeleteAccount={handleDeleteAccount}
         />
       )}
     </div>
   );
 }
+
 
 function LoginButtons() {
   const [email, setEmail] = useState('');
@@ -842,6 +876,7 @@ function ProfileEditor({
   profile,
   onSave,
   onCancel,
+  onDeleteAccount,
 }: {
   loading: boolean;
   profile: ProfileRow | null;
@@ -858,6 +893,7 @@ function ProfileEditor({
     purpose?: string[] | null;
   }) => void;
   onCancel: () => void;
+  onDeleteAccount?: () => void;
 }) {
 
   const [nickname, setNickname] = useState(profile?.nickname ?? '');
@@ -977,7 +1013,7 @@ function ProfileEditor({
             </Select>
           </div>
 
-                    {/* ここまでが既存: 活動エリア */}
+          {/* ここまでが既存: 活動エリア */}
 
           {/* 追加1: 卓球経験年数 */}
           <div className="space-y-2">
@@ -1075,6 +1111,14 @@ function ProfileEditor({
             </Button>
             <Button variant="secondary" onClick={onCancel}>キャンセル</Button>
           </div>
+
+          {onDeleteAccount && (
+            <div className="pt-3">
+              <Button variant="destructive" onClick={onDeleteAccount}>
+                退会する（データ削除）
+              </Button>
+            </div>
+          )}
         </>
       )}
     </div>
