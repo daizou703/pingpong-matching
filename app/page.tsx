@@ -6,6 +6,15 @@ import type { RealtimePostgresChangesPayload } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabaseClient";
 import type { Tables, TablesInsert, TablesUpdate } from "@/types/supabase";
 
+import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Separator } from "@/components/ui/separator";
+import { Badge } from "@/components/ui/badge";
+
 // エラーを安全に文字列へ
 const toErrMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -87,9 +96,9 @@ export default function Page() {
   const [nickname, setNickname] = useState<string>("");
   const [level, setLevel] = useState<number | "">("");
   const [areaCode, setAreaCode] = useState<string>("");
-  const [gender, setGender] = useState<Gender | "">("");
-  const [hand, setHand] = useState<Hand | "">("");
-  const [playingStyle, setPlayingStyle] = useState<PlayingStyle | "">("");
+  const [gender, setGender] = useState<Gender | null>(null);
+  const [hand, setHand] = useState<Hand | null>(null);
+  const [playingStyle, setPlayingStyle] = useState<PlayingStyle | null>(null);
   const [years, setYears] = useState<number | "">("");
   const [purpose, setPurpose] = useState<string>("");
   const [avatarUrl, setAvatarUrl] = useState<string>("");
@@ -112,20 +121,25 @@ export default function Page() {
   const [messages, setMessages] = useState<MessageRow[]>([]);
   const [chatBody, setChatBody] = useState<string>("");
   const chatChannelRef = useRef<RealtimeChannel | null>(null);
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
 
   const hydrateFormFromProfile = (pf: ProfileRow) => {
     setNickname(pf.nickname ?? "");
     setLevel((pf.level as number | null) ?? "");
     setAreaCode(pf.area_code ?? "");
-    setGender(pf.gender ?? "");
-    setHand(pf.hand ?? "");
-    setPlayingStyle(pf.play_style ?? "");
+    setGender(pf.gender);
+    setHand(pf.hand);
+    setPlayingStyle(pf.play_style);
     setYears((pf.years as number | null) ?? "");
     setPurpose((pf.purpose ?? []).join(","));
     setAvatarUrl(pf.avatar_url ?? "");
   };
   const resetForm = () => {
-    setNickname(""); setLevel(""); setAreaCode(""); setGender(""); setHand(""); setPlayingStyle("");
+    setNickname(""); setLevel(""); setAreaCode(""); setGender(null); setHand(null); setPlayingStyle(null);
     setYears(""); setPurpose(""); setAvatarUrl("");
   };
 
@@ -256,9 +270,9 @@ export default function Page() {
         nickname: nickname || null,
         level: typeof level === "number" ? level : level === "" ? null : Number(level),
         area_code: areaCode || null,
-        gender: (gender as Gender) || null,
-        hand: (hand as Hand) || null,
-        play_style: (playingStyle as PlayingStyle) || null,
+        gender,
+        hand,
+        play_style: playingStyle,
         years: typeof years === "number" ? years : years === "" ? null : Number(years),
         purpose: purpose.trim() === "" ? null : purpose.split(",").map((s) => s.trim()).filter(Boolean),
         avatar_url: avatarUrl || null,
@@ -271,7 +285,7 @@ export default function Page() {
         .select()
         .maybeSingle();
       if (error) throw error;
-      if (data) { hydrateFormFromProfile(data); setMsg("プロフィールを保存しました。"); }
+      if (data) { hydrateFormFromProfile(data); setMsg("プロフィールを保存しました。"); toast.success("保存しました"); }
     } catch (e: unknown) { setMsg("プロフィール保存に失敗: " + toErrMsg(e)); }
     finally { setBusy(false); }
   };
@@ -442,34 +456,32 @@ export default function Page() {
       <h1>卓球マッチング Webプロト — Stage 3: Matches & Messages</h1>
 
       {!user ? (
-        <section style={{ marginTop: 16 }}>
-          <p>ログインしてください。</p>
-
-          {/* OAuth */}
-          <button onClick={handleGoogleLogin} disabled={busy} style={{ padding: "8px 12px" }}>
-            Googleでログイン
-          </button>
-
-          {/* Magic Link */}
-          <div style={{ marginTop: 12, padding: 12, border: "1px solid #eee", borderRadius: 8 }}>
-            <div style={{ marginBottom: 6, fontWeight: 600 }}>または、メールでログイン（Magic Link）</div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <input
-                type="email"
-                placeholder="you@example.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                style={{ flex: 1 }}
-              />
-              <button onClick={handleSendMagicLink} disabled={busy || !email.trim()} style={{ padding: "8px 12px" }}>
-                リンクを送る
-              </button>
+        <Card className="mt-4">
+          <CardHeader>
+            <CardTitle>ログイン</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <Button onClick={handleGoogleLogin} disabled={busy}>Googleでログイン</Button>
+            <Separator />
+            <div className="space-y-2">
+              <Label>または、メールでログイン（Magic Link）</Label>
+              <div className="flex gap-2">
+                <Input
+                  type="email"
+                  placeholder="you@example.com"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                />
+                <Button onClick={handleSendMagicLink} disabled={busy || !email.trim()}>
+                  リンクを送る
+                </Button>
+              </div>
+              {emailSent && <p className="text-green-600 text-sm">送信しました。メール内のリンクをクリックしてください。</p>}
             </div>
-            {emailSent && <div style={{ marginTop: 8, color: "#0a0" }}>送信しました。メール内のリンクをクリックしてください。</div>}
-          </div>
 
-          {msg && <p style={{ marginTop: 8, color: "crimson", whiteSpace: "pre-wrap" }}>{msg}</p>}
-        </section>
+            {msg && <p className="text-red-600 text-sm whitespace-pre-wrap">{msg}</p>}
+          </CardContent>
+        </Card>
       ) : (
         <>
           <section style={{ marginTop: 16 }}>
@@ -479,219 +491,335 @@ export default function Page() {
           </section>
 
           {/* Profile */}
-          <section style={{ marginTop: 24, padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
-            <h2 style={{ marginTop: 0 }}>プロフィール編集</h2>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-              <label style={{ display: "flex", flexDirection: "column" }}>ニックネーム
-                <input value={nickname} onChange={(e) => setNickname(e.target.value)} />
-              </label>
-              <label style={{ display: "flex", flexDirection: "column" }}>レベル（数値）
-                <input type="number" value={level} onChange={(e) => setLevel(e.target.value === "" ? "" : Number(e.target.value))} />
-              </label>
-              <label style={{ display: "flex", flexDirection: "column" }}>エリアコード
-                <input value={areaCode} onChange={(e) => setAreaCode(e.target.value)} />
-              </label>
-              <label style={{ display: "flex", flexDirection: "column" }}>性別
-                <select value={gender as string | ""} onChange={(e) => setGender((e.target.value || "") as Gender | "")}>
-                  <option value="">未設定</option><option value="male">male</option><option value="female">female</option><option value="other">other</option>
-                </select>
-              </label>
-              <label style={{ display: "flex", flexDirection: "column" }}>利き手
-                <select value={hand as string | ""} onChange={(e) => setHand((e.target.value || "") as Hand | "")}>
-                  <option value="">未設定</option><option value="right">right</option><option value="left">left</option>
-                </select>
-              </label>
-              <label style={{ display: "flex", flexDirection: "column" }}>プレースタイル
-                <select value={playingStyle as string | ""} onChange={(e) => setPlayingStyle((e.target.value || "") as PlayingStyle | "")}>
-                  <option value="">未設定</option><option value="shake">shake</option><option value="pen">pen</option><option value="others">others</option>
-                </select>
-              </label>
-              <label style={{ display: "flex", flexDirection: "column" }}>経験年数（数値）
-                <input type="number" value={years} onChange={(e) => setYears(e.target.value === "" ? "" : Number(e.target.value))} />
-              </label>
-              <label style={{ gridColumn: "1 / span 2", display: "flex", flexDirection: "column" }}>目的（カンマ区切り）
-                <input placeholder="ラリー, 試合, フットワーク練習 など" value={purpose} onChange={(e) => setPurpose(e.target.value)} />
-              </label>
-              <label style={{ gridColumn: "1 / span 2", display: "flex", flexDirection: "column" }}>アバターURL
-                <input value={avatarUrl} onChange={(e) => setAvatarUrl(e.target.value)} />
-              </label>
-            </div>
-            <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
-              <button onClick={handleSaveProfile} disabled={busy} style={{ padding: "8px 12px" }}>保存</button>
-            </div>
-          </section>
-
-          {/* Availability */}
-          <section style={{ marginTop: 24, padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
-            <h2 style={{ marginTop: 0 }}>空き時間（availability）</h2>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-              <label style={{ display: "flex", flexDirection: "column" }}>開始日時
-                <input type="datetime-local" value={startAt} onChange={(e) => setStartAt(e.target.value)} />
-              </label>
-              <label style={{ display: "flex", flexDirection: "column" }}>終了日時
-                <input type="datetime-local" value={endAt} onChange={(e) => setEndAt(e.target.value)} />
-              </label>
-              <label style={{ display: "flex", flexDirection: "column" }}>エリアコード
-                <input value={slotArea} onChange={(e) => setSlotArea(e.target.value)} />
-              </label>
-              <label style={{ display: "flex", flexDirection: "column" }}>会場メモ
-                <input value={venueHint} onChange={(e) => setVenueHint(e.target.value)} />
-              </label>
-              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <input type="checkbox" checked={isRecurring} onChange={(e) => setIsRecurring(e.target.checked)} />繰り返し
-              </label>
-            </div>
-            <div style={{ marginTop: 12 }}>
-              <button onClick={handleAddSlot} disabled={busy} style={{ padding: "8px 12px" }}>追加</button>
-            </div>
-            <div style={{ marginTop: 16 }}>
-              {slots.length === 0 ? <p>まだ登録がありません。</p> : (
-                <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                  <thead><tr>
-                    <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>開始</th>
-                    <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>終了</th>
-                    <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>エリア</th>
-                    <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>会場メモ</th>
-                    <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>繰り返し</th>
-                    <th style={{ borderBottom: "1px solid #ddd" }}></th>
-                  </tr></thead>
-                  <tbody>
-                    {slots.map((s) => (
-                      <tr key={String(s.id)}>
-                        <td style={{ padding: 6 }}>{fmtDate(s.start_at)}</td>
-                        <td style={{ padding: 6 }}>{fmtDate(s.end_at)}</td>
-                        <td style={{ padding: 6 }}>{s.area_code}</td>
-                        <td style={{ padding: 6 }}>{s.venue_hint ?? ""}</td>
-                        <td style={{ padding: 6 }}>{s.is_recurring ? "Yes" : "No"}</td>
-                        <td style={{ padding: 6 }}>
-                          <button onClick={() => handleDeleteSlot(s.id!)} disabled={busy || s.id == null}>削除</button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-          </section>
-
-          {/* Propose & Matches */}
-          <section style={{ marginTop: 24, padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
-            <h2 style={{ marginTop: 0 }}>相手を探して提案</h2>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 12 }}>
-              <label style={{ display: "flex", flexDirection: "column" }}>開始（提案）
-                <input type="datetime-local" value={proposalStart} onChange={(e)=>setProposalStart(e.target.value)} />
-              </label>
-              <label style={{ display: "flex", flexDirection: "column" }}>終了（提案）
-                <input type="datetime-local" value={proposalEnd} onChange={(e)=>setProposalEnd(e.target.value)} />
-              </label>
-              <label style={{ display: "flex", flexDirection: "column" }}>会場候補
-                <input value={proposalVenue} onChange={(e)=>setProposalVenue(e.target.value)} />
-              </label>
-            </div>
-            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
-              <input placeholder="ニックネーム/エリアで絞り込み" value={userFilter} onChange={(e)=>setUserFilter(e.target.value)} />
-              <span style={{ color: "#666" }}>候補: {filteredUsers.length}人</span>
-            </div>
-            <div style={{ maxHeight: 220, overflow: "auto", border: "1px solid #eee", borderRadius: 8, padding: 8 }}>
-              {filteredUsers.length === 0 ? <p>候補が見つかりません。</p> : (
-                <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                  <thead><tr>
-                    <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>ニックネーム</th>
-                    <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>エリア</th>
-                    <th style={{ borderBottom: "1px solid #ddd" }}></th>
-                  </tr></thead>
-                  <tbody>
-                    {filteredUsers.map(u => (
-                      <tr key={u.user_id}>
-                        <td style={{ padding: 6 }}>{u.nickname ?? u.user_id.slice(0,8)}</td>
-                        <td style={{ padding: 6 }}>{u.area_code ?? "-"}</td>
-                        <td style={{ padding: 6 }}>
-                          <button onClick={()=>handleProposeMatch(u.user_id)} disabled={busy}>提案</button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-          </section>
-
-          {/* My Matches */}
-          <section style={{ marginTop: 24, padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
-            <h2 style={{ marginTop: 0 }}>自分のマッチ</h2>
-            {matches.length === 0 ? <p>まだマッチがありません。</p> : (
-              <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                <thead><tr>
-                  <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>相手</th>
-                  <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>開始</th>
-                  <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>終了</th>
-                  <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>会場</th>
-                  <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: 6 }}>ステータス</th>
-                  <th style={{ borderBottom: "1px solid #ddd" }}></th>
-                </tr></thead>
-                <tbody>
-                  {matches.map(m => {
-                    const opponentId = m.user_a === user!.id ? m.user_b : m.user_a; // string | null の可能性
-                    const opponent = opponentId ? allUsers.find(u => u.user_id === opponentId) : undefined;
-                    return (
-                      <tr key={String(m.id)}>
-                        <td style={{ padding: 6 }}>{opponent?.nickname ?? (opponentId ? opponentId.slice(0,8) : "-")}</td>
-                        <td style={{ padding: 6 }}>{fmtDate(m.start_at)}</td>
-                        <td style={{ padding: 6 }}>{fmtDate(m.end_at)}</td>
-                        <td style={{ padding: 6 }}>{m.venue_text ?? ""}</td>
-                        <td style={{ padding: 6 }}>{m.status}</td>
-                        <td style={{ padding: 6, display: "flex", gap: 6 }}>
-                          {m.status === "pending" && (
-                            <>
-                              <button onClick={()=>handleMatchStatus(m.id!, "confirmed")} disabled={busy || m.id == null}>承諾</button>
-                              <button onClick={()=>handleMatchStatus(m.id!, "cancelled")} disabled={busy || m.id == null}>辞退</button>
-                            </>
-                          )}
-                          <button onClick={()=>openChat(m.id!)} disabled={busy || m.id == null}>チャット</button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            )}
-          </section>
-
-          {/* Chat */}
-          <section style={{ marginTop: 24, padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
-            <h2 style={{ marginTop: 0 }}>チャット</h2>
-            {!activeMatchId ? (
-              <p>マッチの「チャット」を押すと、この下にスレッドが表示されます。</p>
-            ) : (
-              <div>
-                <div style={{ marginBottom: 8, display: "flex", gap: 8 }}>
-                  <button onClick={()=>activeMatchId != null && fetchMessages(activeMatchId)} disabled={busy}>更新</button>
-                  <button onClick={()=>{ try { chatChannelRef.current?.unsubscribe(); } catch {}; setActiveMatchId(null); }} disabled={busy}>閉じる</button>
+          <Card className="mt-6">
+            <CardHeader>
+              <CardTitle>プロフィール編集</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid md:grid-cols-2 gap-4">
+                <div className="space-y-1">
+                  <Label>ニックネーム</Label>
+                  <Input value={nickname} onChange={(e) => setNickname(e.target.value)} />
                 </div>
-                <div style={{ maxHeight: 240, overflow: "auto", border: "1px solid #eee", borderRadius: 8, padding: 8 }}>
-                  {messages.length === 0 ? <p>メッセージはまだありません。</p> : (
-                    <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
-                      {messages.map((m) => (
-                        <li key={String(m.id)} style={{ padding: "6px 0", borderBottom: "1px dashed #eee" }}>
-                          <div style={{ fontSize: 12, color: "#666" }}>{fmtDate(m.sent_at)} — {m.sender_id === user!.id ? "あなた" : "相手"}</div>
-                          <div>{m.body}</div>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
+
+                <div className="space-y-1">
+                  <Label>レベル（数値）</Label>
+                  <Input
+                    type="number"
+                    value={level}
+                    onChange={(e) => setLevel(e.target.value === "" ? "" : Number(e.target.value))}
+                  />
                 </div>
-                <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
-                  <input value={chatBody} onChange={(e)=>setChatBody(e.target.value)} placeholder="メッセージを入力…" style={{ flex: 1 }} />
-                  <button onClick={handleSendMessage} disabled={busy || !chatBody.trim()}>送信</button>
+
+                <div className="space-y-1">
+                  <Label>エリアコード</Label>
+                  <Input value={areaCode} onChange={(e) => setAreaCode(e.target.value)} />
+                </div>
+
+                <div className="space-y-1">
+                  <Label>性別</Label>
+                  <div className="flex gap-2">
+                    <Select
+                      value={gender ?? undefined} // null のときは undefined を渡す
+                      onValueChange={(v) => setGender(v as NonNullable<Gender>)}
+                    >
+                      <SelectTrigger><SelectValue placeholder="未設定" /></SelectTrigger>
+                      <SelectContent>
+                        {/* ← 空文字の SelectItem は置かない */}
+                        <SelectItem value="male">male</SelectItem>
+                        <SelectItem value="female">female</SelectItem>
+                        <SelectItem value="other">other</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Button type="button" variant="secondary" onClick={() => setGender(null)}>
+                      クリア
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <Label>利き手</Label>
+                  <div className="flex gap-2">
+                    <Select
+                      value={hand ?? undefined}
+                      onValueChange={(v) => setHand(v as NonNullable<Hand>)}
+                    >
+                      <SelectTrigger><SelectValue placeholder="未設定" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="right">right</SelectItem>
+                        <SelectItem value="left">left</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Button type="button" variant="secondary" onClick={() => setHand(null)}>
+                      クリア
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <Label>プレースタイル</Label>
+                  <div className="flex gap-2">
+                    <Select
+                      value={playingStyle ?? undefined}
+                      onValueChange={(v) => setPlayingStyle(v as NonNullable<PlayingStyle>)}
+                    >
+                      <SelectTrigger><SelectValue placeholder="未設定" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="shake">shake</SelectItem>
+                        <SelectItem value="pen">pen</SelectItem>
+                        <SelectItem value="others">others</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Button type="button" variant="secondary" onClick={() => setPlayingStyle(null)}>
+                      クリア
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <Label>経験年数（数値）</Label>
+                  <Input
+                    type="number"
+                    value={years}
+                    onChange={(e) => setYears(e.target.value === "" ? "" : Number(e.target.value))}
+                  />
+                </div>
+
+                <div className="md:col-span-2 space-y-1">
+                  <Label>目的（カンマ区切り）</Label>
+                  <Input
+                    placeholder="ラリー, 試合, フットワーク練習 など"
+                    value={purpose}
+                    onChange={(e) => setPurpose(e.target.value)}
+                  />
+                </div>
+
+                <div className="md:col-span-2 space-y-1">
+                  <Label>アバターURL</Label>
+                  <Input value={avatarUrl} onChange={(e) => setAvatarUrl(e.target.value)} />
                 </div>
               </div>
-            )}
-          </section>
+
+              <div className="flex gap-2">
+                <Button onClick={handleSaveProfile} disabled={busy}>保存</Button>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Availability */}
+          <Card className="mt-6">
+            <CardHeader><CardTitle>空き時間（availability）</CardTitle></CardHeader>
+            <CardContent className="space-y-3">
+              <div className="grid md:grid-cols-2 gap-4">
+                <div className="space-y-1">
+                  <Label>開始日時</Label>
+                  <Input type="datetime-local" value={startAt} onChange={(e) => setStartAt(e.target.value)} />
+                </div>
+                <div className="space-y-1">
+                  <Label>終了日時</Label>
+                  <Input type="datetime-local" value={endAt} onChange={(e) => setEndAt(e.target.value)} />
+                </div>
+                <div className="space-y-1">
+                  <Label>エリアコード</Label>
+                  <Input value={slotArea} onChange={(e) => setSlotArea(e.target.value)} />
+                </div>
+                <div className="space-y-1">
+                  <Label>会場メモ</Label>
+                  <Input value={venueHint} onChange={(e) => setVenueHint(e.target.value)} />
+                </div>
+                <label className="inline-flex items-center gap-2">
+                  <input type="checkbox" checked={isRecurring} onChange={(e) => setIsRecurring(e.target.checked)} />
+                  <span>繰り返し</span>
+                </label>
+              </div>
+              <Button onClick={handleAddSlot} disabled={busy}>追加</Button>
+
+              <div>
+                {slots.length === 0 ? (
+                  <p className="text-sm text-muted-foreground mt-2">まだ登録がありません。</p>
+                ) : (
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b">
+                        <th className="text-left py-2">開始</th>
+                        <th className="text-left py-2">終了</th>
+                        <th className="text-left py-2">エリア</th>
+                        <th className="text-left py-2">会場メモ</th>
+                        <th className="text-left py-2">繰り返し</th>
+                        <th />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {slots.map((s) => (
+                        <tr key={String(s.id)} className="border-b">
+                          <td className="py-2">{fmtDate(s.start_at)}</td>
+                          <td className="py-2">{fmtDate(s.end_at)}</td>
+                          <td className="py-2">{s.area_code}</td>
+                          <td className="py-2">{s.venue_hint ?? ""}</td>
+                          <td className="py-2">{s.is_recurring ? "Yes" : "No"}</td>
+                          <td className="py-2">
+                            <Button variant="secondary" onClick={() => handleDeleteSlot(s.id!)} disabled={busy || s.id == null}>
+                              削除
+                            </Button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Propose & Matches */}
+          <Card className="mt-6">
+            <CardHeader><CardTitle>相手を探して提案</CardTitle></CardHeader>
+            <CardContent className="space-y-3">
+              <div className="grid md:grid-cols-3 gap-4">
+                <div className="space-y-1">
+                  <Label>開始（提案）</Label>
+                  <Input type="datetime-local" value={proposalStart} onChange={(e) => setProposalStart(e.target.value)} />
+                </div>
+                <div className="space-y-1">
+                  <Label>終了（提案）</Label>
+                  <Input type="datetime-local" value={proposalEnd} onChange={(e) => setProposalEnd(e.target.value)} />
+                </div>
+                <div className="space-y-1">
+                  <Label>会場候補</Label>
+                  <Input value={proposalVenue} onChange={(e) => setProposalVenue(e.target.value)} />
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <Input
+                  placeholder="ニックネーム/エリアで絞り込み"
+                  value={userFilter}
+                  onChange={(e) => setUserFilter(e.target.value)}
+                />
+                <span className="text-sm text-muted-foreground">候補: {filteredUsers.length}人</span>
+              </div>
+
+              <div className="max-h-56 overflow-auto border rounded-md p-2">
+                {filteredUsers.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">候補が見つかりません。</p>
+                ) : (
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b">
+                        <th className="text-left py-2">ニックネーム</th>
+                        <th className="text-left py-2">エリア</th>
+                        <th />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredUsers.map((u) => (
+                        <tr key={u.user_id} className="border-b">
+                          <td className="py-2">{u.nickname ?? u.user_id.slice(0, 8)}</td>
+                          <td className="py-2">{u.area_code ?? "-"}</td>
+                          <td className="py-2">
+                            <Button onClick={() => handleProposeMatch(u.user_id)} disabled={busy}>提案</Button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* My Matches */}
+          <Card className="mt-6">
+            <CardHeader><CardTitle>自分のマッチ</CardTitle></CardHeader>
+            <CardContent>
+              {matches.length === 0 ? (
+                <p className="text-sm text-muted-foreground">まだマッチがありません。</p>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b">
+                      <th className="text-left py-2">相手</th>
+                      <th className="text-left py-2">開始</th>
+                      <th className="text-left py-2">終了</th>
+                      <th className="text-left py-2">会場</th>
+                      <th className="text-left py-2">ステータス</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {matches.map((m) => {
+                      const opponentId = m.user_a === user!.id ? m.user_b : m.user_a;
+                      const opponent = opponentId ? allUsers.find((u) => u.user_id === opponentId) : undefined;
+                      return (
+                        <tr key={String(m.id)} className="border-b">
+                          <td className="py-2">{opponent?.nickname ?? (opponentId ? opponentId.slice(0, 8) : "-")}</td>
+                          <td className="py-2">{fmtDate(m.start_at)}</td>
+                          <td className="py-2">{fmtDate(m.end_at)}</td>
+                          <td className="py-2">{m.venue_text ?? ""}</td>
+                          <td className="py-2">
+                            {m.status === "confirmed" && <Badge>confirmed</Badge>}
+                            {m.status === "pending" && <Badge variant="secondary">pending</Badge>}
+                            {m.status === "cancelled" && <Badge variant="destructive">cancelled</Badge>}
+                          </td>
+                          <td className="py-2 flex gap-2">
+                            {m.status === "pending" && (
+                              <>
+                                <Button variant="default" onClick={() => handleMatchStatus(m.id!, "confirmed")} disabled={busy || m.id == null}>承諾</Button>
+                                <Button variant="secondary" onClick={() => handleMatchStatus(m.id!, "cancelled")} disabled={busy || m.id == null}>辞退</Button>
+                              </>
+                            )}
+                            <Button variant="outline" onClick={() => openChat(m.id!)} disabled={busy || m.id == null}>チャット</Button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Chat */}
+          <Card className="mt-6">
+            <CardHeader><CardTitle>チャット</CardTitle></CardHeader>
+            <CardContent className="space-y-3">
+              {!activeMatchId ? (
+                <p className="text-sm text-muted-foreground">マッチの「チャット」を押すと、この下にスレッドが表示されます。</p>
+              ) : (
+                <>
+                  <div className="flex gap-2">
+                    <Button variant="outline" onClick={() => activeMatchId != null && fetchMessages(activeMatchId)} disabled={busy}>更新</Button>
+                    <Button variant="secondary" onClick={() => { try { chatChannelRef.current?.unsubscribe(); } catch {}; setActiveMatchId(null); }} disabled={busy}>閉じる</Button>
+                  </div>
+                  <div className="max-h-60 overflow-auto border rounded-md p-3">
+                    {messages.length === 0 ? (
+                      <p className="text-sm text-muted-foreground">メッセージはまだありません。</p>
+                    ) : (
+                      <ul className="space-y-2">
+                        {messages.map((m) => (
+                          <li key={String(m.id)} className="border-b pb-2">
+                            <div className="text-xs text-muted-foreground">
+                              {fmtDate(m.sent_at)} — {m.sender_id === user!.id ? "あなた" : "相手"}
+                            </div>
+                            <div>{m.body}</div>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    <div ref={chatEndRef} />
+                  </div>
+                  <div className="flex gap-2">
+                    <Input value={chatBody} onChange={(e) => setChatBody(e.target.value)} placeholder="メッセージを入力…" />
+                    <Button onClick={handleSendMessage} disabled={busy || !chatBody.trim()}>送信</Button>
+                  </div>
+                </>
+              )}
+            </CardContent>
+          </Card>
         </>
       )}
 
       <hr style={{ margin: "24px 0" }} />
-      <p style={{ color: "#555" }}>※ Stage 3：matches/messages を使った提案＆チャット。RLS は「自分が当事者の match と messages のみ」読み書きできる想定です。</p>
     </main>
   );
 }
