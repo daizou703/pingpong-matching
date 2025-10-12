@@ -1,9 +1,13 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import type { User, Session, AuthChangeEvent, RealtimeChannel } from "@supabase/supabase-js";
+import type { RealtimePostgresChangesPayload } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabaseClient";
 import type { Tables, TablesInsert, TablesUpdate } from "@/types/supabase";
+
+// エラーを安全に文字列へ
+const toErrMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 const dtFmt = new Intl.DateTimeFormat("ja-JP", {
   timeZone: "Asia/Tokyo",
@@ -70,9 +74,8 @@ async function ensureProfile(user: User): Promise<ProfileRow> {
    ========================= */
 export default function Page() {
   const sb = useMemo(() => supabase, []);
-  const [session, setSession] = useState<Session | null>(null);
+  const [, setSession] = useState<Session | null>(null);
   const [user, setUser] = useState<User | null>(null);
-  const [profile, setProfile] = useState<ProfileRow | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
@@ -90,7 +93,6 @@ export default function Page() {
   const [years, setYears] = useState<number | "">("");
   const [purpose, setPurpose] = useState<string>("");
   const [avatarUrl, setAvatarUrl] = useState<string>("");
-  const [profileColumns, setProfileColumns] = useState<string[]>([]); // 存在列の検出用（将来の互換保持）
 
   // Availability state
   const [slots, setSlots] = useState<SlotRow[]>([]);
@@ -110,6 +112,49 @@ export default function Page() {
   const [messages, setMessages] = useState<MessageRow[]>([]);
   const [chatBody, setChatBody] = useState<string>("");
   const chatChannelRef = useRef<RealtimeChannel | null>(null);
+
+  const hydrateFormFromProfile = (pf: ProfileRow) => {
+    setNickname(pf.nickname ?? "");
+    setLevel((pf.level as number | null) ?? "");
+    setAreaCode(pf.area_code ?? "");
+    setGender(pf.gender ?? "");
+    setHand(pf.hand ?? "");
+    setPlayingStyle(pf.play_style ?? "");
+    setYears((pf.years as number | null) ?? "");
+    setPurpose((pf.purpose ?? []).join(","));
+    setAvatarUrl(pf.avatar_url ?? "");
+  };
+  const resetForm = () => {
+    setNickname(""); setLevel(""); setAreaCode(""); setGender(""); setHand(""); setPlayingStyle("");
+    setYears(""); setPurpose(""); setAvatarUrl("");
+  };
+
+  const fetchProfiles = useCallback(async (uid: string) => {
+    const { data, error } = await sb
+      .from("profiles")
+      .select("*")
+      .neq("user_id", uid)
+      .limit(50);
+    if (!error && data) setAllUsers(data);
+  }, [sb]);
+
+  const fetchSlots = useCallback(async (uid: string) => {
+    const { data, error } = await sb
+      .from("availability_slots")
+      .select("*")
+      .eq("user_id", uid)
+      .order("start_at", { ascending: true });
+    if (!error && data) setSlots(data);
+  }, [sb]);
+
+  const fetchMatches = useCallback(async (uid: string) => {
+    const { data, error } = await sb
+      .from("matches")
+      .select("*")
+      .or(`user_a.eq.${uid},user_b.eq.${uid}`)
+      .order("start_at", { ascending: true });
+    if (!error && data) setMatches(data);
+  }, [sb]);
 
   // OAuth コールバック交換＋URLクリーン
   useEffect(() => {
@@ -131,12 +176,14 @@ export default function Page() {
         if (data.session?.user) {
           const pf = await ensureProfile(data.session.user);
           if (!mounted) return;
-          setProfile(pf);
-          setProfileColumns(Object.keys(pf));
           hydrateFormFromProfile(pf);
-          await Promise.all([fetchSlots(data.session.user), fetchProfiles(data.session.user), fetchMatches(data.session.user)]);
+          await Promise.all([
+            fetchSlots(data.session.user.id),
+            fetchProfiles(data.session.user.id),
+            fetchMatches(data.session.user.id),
+          ]);
         }
-      } catch (e) { console.error("[AUTH] init error:", e); }
+      } catch (e: unknown) { console.error("[AUTH] init error:", e); }
     })();
 
     const { data: sub } = sb.auth.onAuthStateChange(async (_event: AuthChangeEvent, sess: Session | null) => {
@@ -145,53 +192,15 @@ export default function Page() {
       setUser(u);
       if (u) {
         const pf = await ensureProfile(u);
-        setProfile(pf);
-        setProfileColumns(Object.keys(pf));
         hydrateFormFromProfile(pf);
-        await Promise.all([fetchSlots(u), fetchProfiles(u), fetchMatches(u)]);
+        await Promise.all([fetchSlots(u.id), fetchProfiles(u.id), fetchMatches(u.id)]);
       } else {
-        setProfile(null); setProfileColumns([]); resetForm();
+        resetForm();
         setSlots([]); setAllUsers([]); setMatches([]); setActiveMatchId(null); setMessages([]);
       }
     });
     return () => { try { sub.subscription?.unsubscribe(); } catch {} mounted = false; };
-  }, [sb]);
-
-  const hydrateFormFromProfile = (pf: ProfileRow) => {
-    setNickname(pf.nickname ?? "");
-    setLevel((pf.level as number | null) ?? "");
-    setAreaCode(pf.area_code ?? "");
-    setGender(pf.gender ?? "");
-    setHand(pf.hand ?? "");
-    setPlayingStyle(pf.play_style ?? "");
-    setYears((pf.years as number | null) ?? "");
-    setPurpose((pf.purpose ?? []).join(","));
-    setAvatarUrl(pf.avatar_url ?? "");
-  };
-  const resetForm = () => {
-    setNickname(""); setLevel(""); setAreaCode(""); setGender(""); setHand(""); setPlayingStyle("");
-    setYears(""); setPurpose(""); setAvatarUrl("");
-  };
-
-  const fetchProfiles = async (u: User) => {
-    const { data, error } = await sb.from("profiles").select("*").neq("user_id", u.id).limit(50);
-    if (!error && data) setAllUsers(data);
-  };
-
-  const fetchSlots = async (u: User) => {
-    const { data, error } = await sb
-      .from("availability_slots").select("*").eq("user_id", u.id).order("start_at", { ascending: true });
-    if (!error && data) setSlots(data);
-  };
-
-  const fetchMatches = async (u: User) => {
-    const { data, error } = await sb
-      .from("matches")
-      .select("*")
-      .or(`user_a.eq.${u.id},user_b.eq.${u.id}`)
-      .order("start_at", { ascending: true });
-    if (!error && data) setMatches(data);
-  };
+  }, [sb, fetchProfiles, fetchSlots, fetchMatches]);
 
   const fetchMessages = async (matchId: NonNullable<MatchRow["id"]>) => {
     const { data, error } = await sb
@@ -222,7 +231,7 @@ export default function Page() {
         setStartAt(""); setEndAt(""); setSlotArea(""); setVenueHint(""); setIsRecurring(false);
         setMsg("空き時間を追加しました。");
       }
-    } catch (e: any) { setMsg("空き時間の追加に失敗: " + (e?.message ?? String(e))); }
+    } catch (e: unknown) { setMsg("空き時間の追加に失敗: " + toErrMsg(e)); }
     finally { setBusy(false); }
   };
 
@@ -234,7 +243,7 @@ export default function Page() {
       if (error) throw error;
       setSlots((prev) => prev.filter((s) => s.id !== slotId));
       setMsg("削除しました。");
-    } catch (e: any) { setMsg("削除に失敗: " + (e?.message ?? String(e))); }
+    } catch (e: unknown) { setMsg("削除に失敗: " + toErrMsg(e)); }
     finally { setBusy(false); }
   };
 
@@ -262,8 +271,8 @@ export default function Page() {
         .select()
         .maybeSingle();
       if (error) throw error;
-      if (data) { setProfile(data); setProfileColumns(Object.keys(data as any)); hydrateFormFromProfile(data); setMsg("プロフィールを保存しました。"); }
-    } catch (e: any) { setMsg("プロフィール保存に失敗: " + (e?.message ?? String(e))); }
+      if (data) { hydrateFormFromProfile(data); setMsg("プロフィールを保存しました。"); }
+    } catch (e: unknown) { setMsg("プロフィール保存に失敗: " + toErrMsg(e)); }
     finally { setBusy(false); }
   };
 
@@ -291,7 +300,7 @@ export default function Page() {
         setMatches((prev) => [...prev, data].sort((a, b) => (a.start_at ?? "").localeCompare(b.start_at ?? "")));
         setMsg("対戦提案を作成しました。");
       }
-    } catch (e: any) { setMsg("提案の作成に失敗: " + (e?.message ?? String(e))); }
+    } catch (e: unknown) { setMsg("提案の作成に失敗: " + toErrMsg(e)); }
     finally { setBusy(false); }
   };
 
@@ -310,7 +319,7 @@ export default function Page() {
         setMatches((prev) => prev.map((m) => m.id === matchId ? data : m));
         setMsg(`ステータスを ${status} に更新しました。`);
       }
-    } catch (e: any) { setMsg("ステータス更新に失敗: " + (e?.message ?? String(e))); }
+    } catch (e: unknown) { setMsg("ステータス更新に失敗: " + toErrMsg(e)); }
     finally { setBusy(false); }
   };
 
@@ -328,8 +337,11 @@ export default function Page() {
       .on(
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "messages", filter: `match_id=eq.${matchId}` },
-        (payload) => {
-          setMessages((prev) => [...prev, payload.new as MessageRow]);
+        (payload: RealtimePostgresChangesPayload<MessageRow>) => {
+          const row = payload.new as MessageRow | null; // ← 型を明示して安全に取り出す
+          if (row) {
+            setMessages((prev) => [...prev, row]);      // ← ここで MessageRow[] を維持
+          }
         }
       )
       .subscribe((status) => {
@@ -358,7 +370,7 @@ export default function Page() {
         setMessages((prev) => [...prev, data]);
         setChatBody("");
       }
-    } catch (e: any) { setMsg("メッセージ送信に失敗: " + (e?.message ?? String(e))); }
+    } catch (e: unknown) { setMsg("メッセージ送信に失敗: " + toErrMsg(e)); }
     finally { setBusy(false); }
   };
 
@@ -369,7 +381,7 @@ export default function Page() {
       const { data, error } = await sb.auth.signInWithOAuth({ provider: "google", options: { redirectTo, skipBrowserRedirect: true } });
       if (error) { setMsg("Googleログイン失敗: " + error.message); return; }
       if (data?.url) window.location.assign(data.url); else setMsg("ログインURLの取得に失敗しました。");
-    } catch (e: any) { setMsg("Googleログイン例外: " + (e?.message ?? String(e))); }
+    } catch (e: unknown) { setMsg("Googleログイン例外: " + toErrMsg(e)); }
     finally { setBusy(false); }
   };
 
@@ -392,8 +404,8 @@ export default function Page() {
 
       setEmailSent(true);
       setMsg("Magic Link を送信しました。メールを確認してください。");
-    } catch (e: any) {
-      setMsg("Magic Link の送信に失敗: " + (e?.message ?? String(e)));
+    } catch (e: unknown) {
+      setMsg("Magic Link の送信に失敗: " + toErrMsg(e));
     } finally { setBusy(false); }
   };
 
@@ -402,14 +414,14 @@ export default function Page() {
       setBusy(true);
       const { error } = await sb.auth.signOut({ scope: "global" as const });
       if (error) { console.warn("[AUTH] global signOut failed, fallback to local", error); await sb.auth.signOut({ scope: "local" as const }); }
-    } catch (e) { console.error("[AUTH] signOut error", e); }
+    } catch (e: unknown) { console.error("[AUTH] signOut error", e); }
     finally {
       try {
         if (typeof window !== "undefined") {
           Object.keys(window.localStorage).filter(k => k.startsWith("sb-") || k.includes("supabase") || k.includes("auth")).forEach(k => window.localStorage.removeItem(k));
         }
       } catch {}
-      setSession(null); setUser(null); setProfile(null); setProfileColumns([]);
+      setSession(null); setUser(null);
       resetForm(); setSlots([]); setAllUsers([]); setMatches([]); setActiveMatchId(null); setMessages([]);
       setBusy(false);
     }
