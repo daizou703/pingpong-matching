@@ -5,6 +5,7 @@ import type { User, Session, AuthChangeEvent, RealtimeChannel } from "@supabase/
 import type { RealtimePostgresChangesPayload } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabaseClient";
 import type { Tables, TablesInsert, TablesUpdate } from "@/types/supabase";
+import type { Database } from "@/types/supabase";
 
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -382,6 +383,32 @@ export default function Page() {
     } catch (e: unknown) { setMsg("ステータス更新に失敗: " + toErrMsg(e)); }
     finally { setBusy(false); }
   };
+
+  // 受信者だけ／pending だけを許可する判定
+  type MatchRow = Database["public"]["Tables"]["matches"]["Row"];
+
+  const me = user?.id;
+  const isReceiver = useCallback(
+    (m: MatchRow) => !!me && m.user_b === me,
+    [me]
+  );
+  const canRespond = useCallback(
+    (m: MatchRow) => isReceiver(m) && m.status === "pending",
+    [isReceiver]
+  );
+
+  // 既存の handleMatchStatus をラップ（不正操作は即エラー）
+  const respondMatch = useCallback(
+    (m: MatchRow, next: "confirmed" | "cancelled") => {
+      if (!canRespond(m)) {
+        toast.error("承諾・辞退できるのは提案の受信者（pendingのみ）です");
+        return;
+      }
+      // 既存の更新関数をそのまま使う
+      handleMatchStatus(m.id!, next);
+    },
+    [canRespond, handleMatchStatus]
+  );
 
   const openChat = async (matchId: NonNullable<MatchRow["id"]>) => {
     // 既存購読があれば解除
@@ -908,10 +935,23 @@ export default function Page() {
                             {m.status === "cancelled" && <Badge variant="destructive">cancelled</Badge>}
                           </td>
                           <td className="py-2 flex gap-2">
-                            {m.status === "pending" && (
+                            {canRespond(m) && (
                               <>
-                                <Button variant="default" onClick={() => handleMatchStatus(m.id!, "confirmed")} disabled={busy || m.id == null}>承諾</Button>
-                                <Button variant="secondary" onClick={() => handleMatchStatus(m.id!, "cancelled")} disabled={busy || m.id == null}>辞退</Button>
+                                <Button
+                                  variant="default"
+                                  onClick={() => respondMatch(m, "confirmed")}
+                                  disabled={busy || m.id == null}
+                                >
+                                  承諾
+                                </Button>
+
+                                <Button
+                                  variant="secondary"
+                                  onClick={() => respondMatch(m, "cancelled")}
+                                  disabled={busy || m.id == null}
+                                >
+                                  辞退
+                                </Button>
                               </>
                             )}
                             <Button variant="outline" onClick={() => openChat(m.id!)} disabled={busy || m.id == null}>チャット</Button>
