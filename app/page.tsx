@@ -120,6 +120,9 @@ export default function Page() {
   const [activeMatchId, setActiveMatchId] = useState<MatchRow["id"] | null>(null); // ← number想定（生成型に追従）
   const [messages, setMessages] = useState<MessageRow[]>([]);
   const [chatBody, setChatBody] = useState<string>("");
+  // 入力の最新値を参照するための ref（useCallback の依存から chatBody を外すため）
+  const chatBodyRef = useRef("");
+  useEffect(() => { chatBodyRef.current = chatBody; }, [chatBody]);
   const chatChannelRef = useRef<RealtimeChannel | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   
@@ -309,6 +312,10 @@ export default function Page() {
   // 未入力時にフォーカスを当てるための ref
   const proposalStartRef = useRef<HTMLInputElement | null>(null);
   const proposalEndRef   = useRef<HTMLInputElement | null>(null);
+  // 提案ボタン専用の"送信中"フラグ（ユーザー単位）
+  const [proposing, setProposing] = useState<Record<string, boolean>>({});
+  // --- Chat peer display ---
+  const [chatPeer, setChatPeer] = useState<{ user_id: string; nickname: string | null } | null>(null);
 
   const handleProposeMatch = async (toUserId: string) => {
     if (!user) return;
@@ -319,6 +326,8 @@ export default function Page() {
       return;
     }
     setBusy(true); setMsg(null);
+    // この相手へのボタンだけを"送信中"に
+    setProposing((prev) => ({ ...prev, [toUserId]: true }));
     try {
       const payload: MatchInsert = {
         user_a: user.id,
@@ -343,9 +352,16 @@ export default function Page() {
       if (data) {
         setMatches((prev) => [...prev, data].sort((a, b) => (a.start_at ?? "").localeCompare(b.start_at ?? "")));
         setMsg("対戦提案を作成しました。");
+        setActiveMatchId(data.id); // 提案直後にそのマッチを選択
+        // チャットのオープンは"待たない"（UIブロック回避）
+        // ノンブロッキングで呼び出し、エラーは握りつぶす
+        openChat(data.id).catch(() => {});
       }
     } catch (e: unknown) { setMsg("提案の作成に失敗: " + toErrMsg(e)); }
-    finally { setBusy(false); }
+    finally {
+      setBusy(false);
+      setProposing((prev) => ({ ...prev, [toUserId]: false }));
+    }
   };
 
   const handleMatchStatus = async (matchId: MatchRow["id"], status: MatchStatus) => {
@@ -402,16 +418,15 @@ export default function Page() {
   };
 
 
-  const handleSendMessage = async () => {
-    if (!user || activeMatchId == null || !chatBody.trim()) return;
+ const userId = user?.id; // ← 追加（コンポーネント内の上の方でOK）
+
+ const handleSendMessage = useCallback(async () => {
+   if (!userId || activeMatchId == null) return;
+    const body = chatBodyRef.current.trim();
+    if (!body) return;
     setBusy(true);
     try {
-      const payload: MessageInsert = {
-        match_id: activeMatchId as NonNullable<MessageInsert["match_id"]>, // number
-        sender_id: user.id,
-        body: chatBody.trim(),
-        // sent_at に default があれば省略可
-      };
+      const payload: MessageInsert = { match_id: activeMatchId, sender_id: userId, body };
       const { data, error } = await sb.from("messages").insert([payload]).select().maybeSingle();
       if (error) throw error;
       // ★ 即時表示：INSERT応答で返った行をその場で反映（Realtimeは補強用）
@@ -425,7 +440,7 @@ export default function Page() {
       setChatBody("");
     } catch (e: unknown) { setMsg("メッセージ送信に失敗: " + toErrMsg(e)); }
     finally { setBusy(false); }
-  };
+    }, [sb, userId, activeMatchId]);  // ← 依存は userId に
   
   // Enter=送信 / Shift+Enter=改行（textarea）
   const handleChatKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -498,6 +513,29 @@ export default function Page() {
       try { chatChannelRef.current?.unsubscribe(); } catch {}
     };
   }, []);
+
+  +  // 選択中のマッチ相手（ニックネーム）をヘッダー表示用に取得
+  useEffect(() => {
+    if (!user?.id || !activeMatchId) { setChatPeer(null); return; }
+    const m = matches.find((mm) => mm.id === activeMatchId);
+    if (!m) { setChatPeer(null); return; }
+    const otherId = m.user_a === user.id ? m.user_b : m.user_a;
+    if (!otherId) { setChatPeer(null); return; }
+    // まずは allUsers のキャッシュから探す
+    const cached = allUsers.find((u) => u.user_id === otherId);
+    if (cached) { setChatPeer({ user_id: cached.user_id, nickname: cached.nickname }); return; }
+    // 見つからなければ profiles を1件だけフェッチ（保険）
+    let cancelled = false;
+    (async () => {
+      const { data } = await sb
+        .from("profiles")
+        .select("user_id,nickname")
+        .eq("user_id", otherId)
+        .maybeSingle();
+      if (!cancelled) setChatPeer(data ?? { user_id: otherId, nickname: null });
+    })();
+    return () => { cancelled = true; };
+  }, [sb, user?.id, activeMatchId, matches, allUsers]);
 
   useEffect(() => {
   if (!user?.id) return;
@@ -822,9 +860,9 @@ export default function Page() {
                           <td className="py-2">
                           <Button
                             onClick={() => handleProposeMatch(u.user_id)}
-                            disabled={busy || !proposalStart || !proposalEnd}
+                            disabled={proposing[u.user_id] || busy || !proposalStart || !proposalEnd}
                           >
-                            {busy ? "送信中…" : "提案"}
+                            {proposing[u.user_id] ? "送信中…" : "提案"}
                           </Button>
                           </td>
                         </tr>
@@ -889,7 +927,16 @@ export default function Page() {
 
           {/* Chat */}
           <Card className="mt-6">
-            <CardHeader><CardTitle>チャット</CardTitle></CardHeader>
+            <CardHeader>
+              <CardTitle>
+                チャット
+                {chatPeer && (
+                  <span className="ml-3 text-base font-normal text-muted-foreground">
+                    相手：{chatPeer.nickname ?? chatPeer.user_id.slice(0, 8)}
+                  </span>
+                )}
+              </CardTitle>
+            </CardHeader>
             <CardContent className="space-y-3">
               {!activeMatchId ? (
                 <p className="text-sm text-muted-foreground">マッチの「チャット」を押すと、この下にスレッドが表示されます。</p>
