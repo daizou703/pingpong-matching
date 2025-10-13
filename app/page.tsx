@@ -15,6 +15,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+
+import { useRouter } from "next/navigation";
 
 // エラーを安全に文字列へ
 const toErrMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -133,6 +136,30 @@ export default function Page() {
   // ▼ 追加：matches の Realtime チャンネル
   const matchesChannelRef = useRef<RealtimeChannel | null>(null);
 
+  const router = useRouter();
+
+  // --- Profile Detail (相手の詳細表示) ---
+  type ProfileRow = Tables<"profiles">;
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailProfile, setDetailProfile] = useState<ProfileRow | null>(null);
+
+  // allUsers から見つからなければ profiles 1件フェッチ
+  const openProfileDetail = useCallback(async (userId: string) => {
+    setDetailOpen(true);
+    // キャッシュ優先
+    const cached = allUsers.find(u => u.user_id === userId) as ProfileRow | undefined;
+    if (cached) { setDetailProfile(cached); return; }
+    setDetailLoading(true);
+    const { data } = await sb
+      .from("profiles")
+      .select("*")
+      .eq("user_id", userId)
+      .maybeSingle();
+    setDetailProfile((data as ProfileRow) ?? null);
+    setDetailLoading(false);
+  }, [allUsers, sb]);
+
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
@@ -180,6 +207,15 @@ export default function Page() {
     if (!error && data) setMatches(data);
   }, [sb]);
 
+  // ログイン後に呼ぶデータ再読込（関数名は調整自由）
+  // あるものだけ呼ぶ：まずは profiles の再取得に限定
+  const reloadAppData = useCallback(async () => {
+    if (!user?.id) return; // 未ログイン時はスキップ
+    await Promise.allSettled([
+      fetchProfiles(user.id),
+    ]);
+  }, [fetchProfiles, user?.id]);
+
   // OAuth コールバック交換＋URLクリーン
   useEffect(() => {
     let mounted = true;
@@ -187,11 +223,15 @@ export default function Page() {
       try {
         const url = new URL(window.location.href);
         const hasCode = url.searchParams.get("code") && url.searchParams.get("state");
+        // OAuthエラーが付与されている場合は表示
+        const oauthErr = url.searchParams.get("error_description") || url.searchParams.get("error");
+        if (oauthErr) setMsg("Googleログイン失敗: " + decodeURIComponent(oauthErr));
         if (hasCode) {
           const { error } = await sb.auth.exchangeCodeForSession(window.location.href);
           if (error) console.error("[AUTH] exchange error:", error);
           url.search = "";
           window.history.replaceState({}, "", url.toString());
+          await reloadAppData(); // ← この行を追加
         }
         const { data } = await sb.auth.getSession();
         if (!mounted) return;
@@ -482,9 +522,12 @@ export default function Page() {
     try {
       setBusy(true);
       const redirectTo = process.env.NODE_ENV === "development" ? "http://localhost:3000/" : new URL("/", window.location.origin).toString();
-      const { data, error } = await sb.auth.signInWithOAuth({ provider: "google", options: { redirectTo, skipBrowserRedirect: true } });
-      if (error) { setMsg("Googleログイン失敗: " + error.message); return; }
-      if (data?.url) window.location.assign(data.url); else setMsg("ログインURLの取得に失敗しました。");
+      // 標準フロー（自動リダイレクト）に戻す
+      const { error } = await sb.auth.signInWithOAuth({
+        provider: "google",
+        options: { redirectTo }  // skipBrowserRedirect は指定しない
+      });
+      if (error) { setMsg("Googleログイン失敗: " + error.message); }
     } catch (e: unknown) { setMsg("Googleログイン例外: " + toErrMsg(e)); }
     finally { setBusy(false); }
   };
@@ -507,26 +550,34 @@ export default function Page() {
       if (error) throw error;
 
       setEmailSent(true);
-      setMsg("Magic Link を送信しました。メールを確認してください。");
     } catch (e: unknown) {
       setMsg("Magic Link の送信に失敗: " + toErrMsg(e));
     } finally { setBusy(false); }
   };
 
   const handleLogout = async () => {
+    setBusy(true);
     try {
-      setBusy(true);
-      const { error } = await sb.auth.signOut({ scope: "global" as const });
-      if (error) { console.warn("[AUTH] global signOut failed, fallback to local", error); await sb.auth.signOut({ scope: "local" as const }); }
-    } catch (e: unknown) { console.error("[AUTH] signOut error", e); }
-    finally {
-      try {
-        if (typeof window !== "undefined") {
-          Object.keys(window.localStorage).filter(k => k.startsWith("sb-") || k.includes("supabase") || k.includes("auth")).forEach(k => window.localStorage.removeItem(k));
-        }
-      } catch {}
-      setSession(null); setUser(null);
-      resetForm(); setSlots([]); setAllUsers([]); setMatches([]); setActiveMatchId(null); setMessages([]);
+      await sb.auth.signOut();
+
+      // ローカル状態をクリア（ここはあなたの state 名に合わせて）
+      setSession(null);
+      setUser(null);
+      setEmailSent(false);
+      setMsg(null);
+
+      // データ系のリセット（あれば）
+      setMatches([]);
+      setActiveMatchId(null);
+      setMessages([]);
+      // ほか slots / allUsers なども必要なら空に
+
+      // 画面を確実に最新化
+      router.refresh(); // app router
+      // or: window.location.assign("/") でもOK
+    } catch (e) {
+      setMsg("ログアウトに失敗: " + toErrMsg(e));
+    } finally {
       setBusy(false);
     }
   };
@@ -541,7 +592,34 @@ export default function Page() {
     };
   }, []);
 
-  +  // 選択中のマッチ相手（ニックネーム）をヘッダー表示用に取得
+  // 起動時にセッションを取得して state に反映
+  useEffect(() => {
+    (async () => {
+      const { data: { session } } = await sb.auth.getSession();
+      setSession(session ?? null);
+      setUser(session?.user ?? null);
+    })();
+  }, [sb]);
+
+  // auth 状態の変化に追従して state とデータを同期
+  useEffect(() => {
+    const { data: { subscription } } = sb.auth.onAuthStateChange(async (_event, session) => {
+      setSession(session ?? null);
+      setUser(session?.user ?? null);
+
+      if (session?.user) {
+        // ログイン完了 → 初期データを再読込
+        await reloadAppData(); // ← 下で定義
+      } else {
+        // ログアウト → 画面からデータを消す
+        setMatches([]); setActiveMatchId(null); setMessages([]);
+        // 必要なら他の一覧もクリア
+      }
+    });
+    return () => subscription.unsubscribe();
+  }, [sb]);
+
+  // 選択中のマッチ相手（ニックネーム）をヘッダー表示用に取得
   useEffect(() => {
     if (!user?.id || !activeMatchId) { setChatPeer(null); return; }
     const m = matches.find((mm) => mm.id === activeMatchId);
@@ -565,55 +643,60 @@ export default function Page() {
   }, [sb, user?.id, activeMatchId, matches, allUsers]);
 
   useEffect(() => {
-  if (!user?.id) return;
+    if (!user?.id) return;
 
-  // 依存が変わるたびに古い購読を解除
-  try { matchesChannelRef.current?.unsubscribe(); } catch {}
-
-  const ch = sb
-    .channel(`matches:${user.id}`)
-    .on(
-      "postgres_changes",
-      { schema: "public", table: "matches", event: "*" },
-      (payload: RealtimePostgresChangesPayload<MatchRow>) => {
-        const rowNew = payload.new as MatchRow | null;
-        const rowOld = payload.old as MatchRow | null;
-        const row = rowNew ?? rowOld;
-        if (!row) return;
-
-        // 自分が当事者でない行は無視
-        const involvesMe = row.user_a === user.id || row.user_b === user.id;
-        if (!involvesMe) return;
-
-        setMatches((prev /*: MatchRow[] */) => {
-          let next = prev.slice();
-
-          switch (payload.eventType) {
-            case "INSERT":
-              if (rowNew && !next.some((m) => m.id === rowNew.id)) next.push(rowNew);
-              break;
-            case "UPDATE":
-              if (rowNew) next = next.map((m) => (m.id === rowNew.id ? rowNew : m));
-              break;
-            case "DELETE":
-              if (rowOld) next = next.filter((m) => m.id !== rowOld.id);
-              break;
-          }
-
-          next.sort((a, b) => (a.start_at ?? "").localeCompare(b.start_at ?? ""));
-          return next;
-        });
-      }
-    )
-    .subscribe();
-
-  matchesChannelRef.current = ch;
-
-  // クリーンアップ
-  return () => {
+    // 依存が変わるたびに古い購読を解除
     try { matchesChannelRef.current?.unsubscribe(); } catch {}
-  };
-}, [sb, user?.id]);
+
+    const ch = sb
+      .channel(`matches:${user.id}`)
+      .on(
+        "postgres_changes",
+        { schema: "public", table: "matches", event: "*" },
+        (payload: RealtimePostgresChangesPayload<MatchRow>) => {
+          const rowNew = payload.new as MatchRow | null;
+          const rowOld = payload.old as MatchRow | null;
+          const row = rowNew ?? rowOld;
+          if (!row) return;
+
+          // 自分が当事者でない行は無視
+          const involvesMe = row.user_a === user.id || row.user_b === user.id;
+          if (!involvesMe) return;
+
+          setMatches((prev /*: MatchRow[] */) => {
+            let next = prev.slice();
+
+            switch (payload.eventType) {
+              case "INSERT":
+                if (rowNew && !next.some((m) => m.id === rowNew.id)) next.push(rowNew);
+                break;
+              case "UPDATE":
+                if (rowNew) next = next.map((m) => (m.id === rowNew.id ? rowNew : m));
+                break;
+              case "DELETE":
+                if (rowOld) next = next.filter((m) => m.id !== rowOld.id);
+                break;
+            }
+
+            next.sort((a, b) => (a.start_at ?? "").localeCompare(b.start_at ?? ""));
+            return next;
+          });
+        }
+      )
+      .subscribe();
+
+    matchesChannelRef.current = ch;
+
+    // クリーンアップ
+    return () => {
+      try { matchesChannelRef.current?.unsubscribe(); } catch {}
+    };
+  }, [sb, user?.id]);
+
+  // 未ログイン時はグローバルmsgをクリアして、ログインカードに他セクションの文言が出ないようにする
+  useEffect(() => {
+    if (!user) setMsg(null);
+  }, [user]);
 
   return (
     <main style={{ maxWidth: 1100, margin: "24px auto", padding: "0 16px" }}>
@@ -643,7 +726,10 @@ export default function Page() {
               {emailSent && <p className="text-green-600 text-sm">送信しました。メール内のリンクをクリックしてください。</p>}
             </div>
 
-            {msg && <p className="text-red-600 text-sm whitespace-pre-wrap">{msg}</p>}
+            {/* 成功時(emailSent=true)は重複させない。失敗時のみ表示 */}
+            {!emailSent && msg && (
+              <p className="text-red-600 text-sm whitespace-pre-wrap">{msg}</p>
+            )}
           </CardContent>
         </Card>
       ) : (
@@ -885,12 +971,17 @@ export default function Page() {
                           <td className="py-2">{u.nickname ?? u.user_id.slice(0, 8)}</td>
                           <td className="py-2">{u.area_code ?? "-"}</td>
                           <td className="py-2">
-                          <Button
-                            onClick={() => handleProposeMatch(u.user_id)}
-                            disabled={proposing[u.user_id] || busy || !proposalStart || !proposalEnd}
-                          >
-                            {proposing[u.user_id] ? "送信中…" : "提案"}
-                          </Button>
+                          <div className="flex items-center gap-2">
+                            <Button variant="outline" onClick={() => openProfileDetail(u.user_id)}>
+                              詳細
+                            </Button>
+                            <Button
+                              onClick={() => handleProposeMatch(u.user_id)}
+                              disabled={proposing[u.user_id] || busy || !proposalStart || !proposalEnd}
+                            >
+                              {proposing[u.user_id] ? "送信中…" : "提案"}
+                            </Button>
+                          </div>
                           </td>
                         </tr>
                       ))}
@@ -1021,6 +1112,48 @@ export default function Page() {
       )}
 
       <hr style={{ margin: "24px 0" }} />
+
+      {/* 相手プロフィールの詳細ダイアログ */}
+      <Dialog open={detailOpen} onOpenChange={(o) => { setDetailOpen(o); if (!o) setDetailProfile(null); }}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>相手のプロフィール</DialogTitle>
+            <DialogDescription>提案前に相手の情報を確認できます。</DialogDescription>
+          </DialogHeader>
+          {detailLoading ? (
+            <div className="py-6 text-sm text-muted-foreground">読み込み中…</div>
+          ) : detailProfile ? (
+            <div className="space-y-3 text-sm">
+              <div className="flex items-center justify-between">
+                <div className="text-base font-medium">
+                  {detailProfile.nickname ?? "（ニックネーム未設定）"}
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  {detailProfile.user_id.slice(0, 8)}
+                </div>
+              </div>
+              <Separator />
+              <div className="grid grid-cols-3 gap-2">
+                <div className="text-muted-foreground">レベル</div>
+                <div className="col-span-2">{detailProfile.level ?? "-"}</div>
+                <div className="text-muted-foreground">エリア</div>
+                <div className="col-span-2">{detailProfile.area_code ?? "-"}</div>
+                <div className="text-muted-foreground">目的</div>
+                <div className="col-span-2">{detailProfile.purpose?.join("、") ?? "-"}</div>
+                <div className="text-muted-foreground">プレースタイル</div>
+                <div className="col-span-2">{detailProfile.play_style ?? "-"}</div>
+              </div>
+              <Separator />
+              <div>
+                <div className="text-muted-foreground mb-1">自己紹介</div>
+                <p className="whitespace-pre-wrap">{detailProfile.bio ?? "（未入力）"}</p>
+              </div>
+            </div>
+          ) : (
+            <div className="py-6 text-sm text-muted-foreground">プロフィールが見つかりませんでした。</div>
+          )}
+        </DialogContent>
+      </Dialog>
     </main>
   );
 }
