@@ -122,6 +122,12 @@ export default function Page() {
   const [chatBody, setChatBody] = useState<string>("");
   const chatChannelRef = useRef<RealtimeChannel | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
+  
+  // 追加: メッセージIDで重複追加を防ぐ
+  const messageIdsRef = useRef<Set<string>>(new Set());
+
+  // ▼ 追加：matches の Realtime チャンネル
+  const matchesChannelRef = useRef<RealtimeChannel | null>(null);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -222,7 +228,13 @@ export default function Page() {
       .select("*")
       .eq("match_id", matchId) // ← number で検索
       .order("sent_at", { ascending: true });
-    if (!error && data) setMessages(data);
+    if (!error && data) {
+      setMessages(data);
+      // 取得時にIDセットを同期（重複防止の基準）
+      const ids = new Set<string>();
+      for (const m of data) if (m.id != null) ids.add(String(m.id));
+      messageIdsRef.current = ids;
+    }
   };
 
   const handleAddSlot = async () => {
@@ -294,10 +306,18 @@ export default function Page() {
   const [proposalStart, setProposalStart] = useState<string>("");
   const [proposalEnd, setProposalEnd] = useState<string>("");
   const [proposalVenue, setProposalVenue] = useState<string>("");
+  // 未入力時にフォーカスを当てるための ref
+  const proposalStartRef = useRef<HTMLInputElement | null>(null);
+  const proposalEndRef   = useRef<HTMLInputElement | null>(null);
 
   const handleProposeMatch = async (toUserId: string) => {
     if (!user) return;
-    if (!proposalStart || !proposalEnd) { setMsg("提案には開始/終了が必要です"); return; }
+    if (!proposalStart || !proposalEnd) {
+      setMsg("提案には開始/終了が必要です");
+      if (!proposalStart) { toast.error("開始（提案）を入力してください"); proposalStartRef.current?.focus(); }
+      else { toast.error("終了（提案）を入力してください"); proposalEndRef.current?.focus(); }
+      return;
+    }
     setBusy(true); setMsg(null);
     try {
       const payload: MatchInsert = {
@@ -308,8 +328,18 @@ export default function Page() {
         venue_text: proposalVenue || null,
         status: "pending",
       };
-      const { data, error } = await sb.from("matches").insert([payload]).select().maybeSingle();
-      if (error) throw error;
+      // Promise を明示的に作って toast に渡す（UI用）→ 同じ Promise を await して結果を使う
+      const p = (async () => {
+        const { data, error } = await sb.from("matches").insert([payload]).select().single();
+        if (error) throw error;
+        return data;
+      })();
+      toast.promise(p, {
+        loading: "提案を送信中…",
+        success: "提案を作成しました！",
+        error: (e) => `提案に失敗しました: ${e?.message ?? e}`,
+      });
+      const data = await p;
       if (data) {
         setMatches((prev) => [...prev, data].sort((a, b) => (a.start_at ?? "").localeCompare(b.start_at ?? "")));
         setMsg("対戦提案を作成しました。");
@@ -354,7 +384,11 @@ export default function Page() {
         (payload: RealtimePostgresChangesPayload<MessageRow>) => {
           const row = payload.new as MessageRow | null; // ← 型を明示して安全に取り出す
           if (row) {
-            setMessages((prev) => [...prev, row]);      // ← ここで MessageRow[] を維持
+            const id = row.id != null ? String(row.id) : null;
+            if (!id || !messageIdsRef.current.has(id)) {
+              if (id) messageIdsRef.current.add(id);
+              setMessages((prev) => [...prev, row]);
+            }
           }
         }
       )
@@ -380,13 +414,27 @@ export default function Page() {
       };
       const { data, error } = await sb.from("messages").insert([payload]).select().maybeSingle();
       if (error) throw error;
+      // ★ 即時表示：INSERT応答で返った行をその場で反映（Realtimeは補強用）
       if (data) {
+        if (data.id != null) {
+          // Realtime到着時の重複を防ぐため、先にIDを記録
+          messageIdsRef.current.add(String(data.id));
+        }
         setMessages((prev) => [...prev, data]);
-        setChatBody("");
       }
+      setChatBody("");
     } catch (e: unknown) { setMsg("メッセージ送信に失敗: " + toErrMsg(e)); }
     finally { setBusy(false); }
   };
+  
+  // Enter=送信 / Shift+Enter=改行（textarea）
+  const handleChatKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      void handleSendMessage();
+    }
+  }, [handleSendMessage]);
+
 
   const handleGoogleLogin = async () => {
     try {
@@ -451,9 +499,60 @@ export default function Page() {
     };
   }, []);
 
+  useEffect(() => {
+  if (!user?.id) return;
+
+  // 依存が変わるたびに古い購読を解除
+  try { matchesChannelRef.current?.unsubscribe(); } catch {}
+
+  const ch = sb
+    .channel(`matches:${user.id}`)
+    .on(
+      "postgres_changes",
+      { schema: "public", table: "matches", event: "*" },
+      (payload: RealtimePostgresChangesPayload<MatchRow>) => {
+        const rowNew = payload.new as MatchRow | null;
+        const rowOld = payload.old as MatchRow | null;
+        const row = rowNew ?? rowOld;
+        if (!row) return;
+
+        // 自分が当事者でない行は無視
+        const involvesMe = row.user_a === user.id || row.user_b === user.id;
+        if (!involvesMe) return;
+
+        setMatches((prev /*: MatchRow[] */) => {
+          let next = prev.slice();
+
+          switch (payload.eventType) {
+            case "INSERT":
+              if (rowNew && !next.some((m) => m.id === rowNew.id)) next.push(rowNew);
+              break;
+            case "UPDATE":
+              if (rowNew) next = next.map((m) => (m.id === rowNew.id ? rowNew : m));
+              break;
+            case "DELETE":
+              if (rowOld) next = next.filter((m) => m.id !== rowOld.id);
+              break;
+          }
+
+          next.sort((a, b) => (a.start_at ?? "").localeCompare(b.start_at ?? ""));
+          return next;
+        });
+      }
+    )
+    .subscribe();
+
+  matchesChannelRef.current = ch;
+
+  // クリーンアップ
+  return () => {
+    try { matchesChannelRef.current?.unsubscribe(); } catch {}
+  };
+}, [sb, user?.id]);
+
   return (
     <main style={{ maxWidth: 1100, margin: "24px auto", padding: "0 16px" }}>
-      <h1>卓球マッチング Webプロト — Stage 3: Matches & Messages</h1>
+      <h1>卓球練習相手マッチングアプリ（プロトタイプ）</h1>
 
       {!user ? (
         <Card className="mt-4">
@@ -678,11 +777,15 @@ export default function Page() {
               <div className="grid md:grid-cols-3 gap-4">
                 <div className="space-y-1">
                   <Label>開始（提案）</Label>
-                  <Input type="datetime-local" value={proposalStart} onChange={(e) => setProposalStart(e.target.value)} />
+                  <Input
+                    ref={proposalStartRef}
+                    type="datetime-local" value={proposalStart} onChange={(e) => setProposalStart(e.target.value)} />
                 </div>
                 <div className="space-y-1">
                   <Label>終了（提案）</Label>
-                  <Input type="datetime-local" value={proposalEnd} onChange={(e) => setProposalEnd(e.target.value)} />
+                  <Input
+                    ref={proposalEndRef}
+                    type="datetime-local" value={proposalEnd} onChange={(e) => setProposalEnd(e.target.value)} />
                 </div>
                 <div className="space-y-1">
                   <Label>会場候補</Label>
@@ -717,7 +820,12 @@ export default function Page() {
                           <td className="py-2">{u.nickname ?? u.user_id.slice(0, 8)}</td>
                           <td className="py-2">{u.area_code ?? "-"}</td>
                           <td className="py-2">
-                            <Button onClick={() => handleProposeMatch(u.user_id)} disabled={busy}>提案</Button>
+                          <Button
+                            onClick={() => handleProposeMatch(u.user_id)}
+                            disabled={busy || !proposalStart || !proposalEnd}
+                          >
+                            {busy ? "送信中…" : "提案"}
+                          </Button>
                           </td>
                         </tr>
                       ))}
@@ -809,7 +917,13 @@ export default function Page() {
                     <div ref={chatEndRef} />
                   </div>
                   <div className="flex gap-2">
-                    <Input value={chatBody} onChange={(e) => setChatBody(e.target.value)} placeholder="メッセージを入力…" />
+                    <textarea
+                      className="w-full min-h-[40px] max-h-40 resize-y rounded-md border px-3 py-2 text-sm outline-none"
+                      placeholder="メッセージを入力…（Enterで送信 / Shift+Enterで改行）"
+                      value={chatBody}
+                      onChange={(e) => setChatBody(e.target.value)}
+                      onKeyDown={handleChatKeyDown}
+                    />
                     <Button onClick={handleSendMessage} disabled={busy || !chatBody.trim()}>送信</Button>
                   </div>
                 </>
