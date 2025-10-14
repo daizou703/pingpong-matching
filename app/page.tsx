@@ -128,7 +128,17 @@ export default function Page() {
     area_code: string | null;
     venue_hint: string | null;
   };
-  const [nextSlotMap, setNextSlotMap] = useState<Record<string, PublicSlot | null>>({});  const [loadingNextSlots, setLoadingNextSlots] = useState(false);
+
+  const [nextSlotMap, setNextSlotMap] = useState<Record<string, PublicSlot | null>>({});
+  const [loadingNextSlots, setLoadingNextSlots] = useState(false);
+  // 表示オプション：重なりありのみ表示する
+  const [showOverlapOnly, setShowOverlapOnly] = useState(false);
+  // 時間帯の重なり判定（[a,b) と [c,d) が交差するか）
+  const hasOverlap = useCallback((aStart: string, aEnd: string, bStart: string, bEnd: string) => {
+    // 開始 < 相手の終了 && 相手の開始 < 終了 で重なり
+    return new Date(aStart).getTime() < new Date(bEnd).getTime()
+        && new Date(bStart).getTime() < new Date(aEnd).getTime();
+  }, []);
 
   // Matches & messages
   const [matches, setMatches] = useState<MatchRow[]>([]);
@@ -331,24 +341,39 @@ export default function Page() {
     ]);
   }, [fetchProfiles, fetchSlots, fetchMatches, user?.id]);
 
-  // OAuth コールバック交換＋URLクリーン
+  // OAuth コールバック交換＋URLクリーン（重複実行ガード＆既存セッション確認つき）
   useEffect(() => {
     let mounted = true;
+    let exchanging = false; // ← 二重交換ガード
     (async () => {
       try {
         const url = new URL(window.location.href);
-        const hasCode = url.searchParams.get("code") && url.searchParams.get("state");
+        // 既にセッションがある → 交換不要（戻る/再読込時の誤爆防止）
+        const cur = await sb.auth.getSession();
+        if (cur.data.session) {
+          if (!mounted) return;
+          setSession(cur.data.session);
+          setUser(cur.data.session.user);
+        }
+        // OAuth コールバックは code の有無で判定（state が無いケースもありうる）
+        const hasCode = !!url.searchParams.get("code");
         // OAuthエラーが付与されている場合は表示
         const oauthErr = url.searchParams.get("error_description") || url.searchParams.get("error");
         if (oauthErr) setMsg("Googleログイン失敗: " + decodeURIComponent(oauthErr));
-        if (hasCode) {
-          const { error } = await sb.auth.exchangeCodeForSession(window.location.href);
-          if (error) console.error("[AUTH] exchange error:", error);
+        if (hasCode && !exchanging) {
+          exchanging = true;
+          const { data, error } = await sb.auth.exchangeCodeForSession(window.location.href);
+          if (error) {
+            console.error("[AUTH] exchange error:", error);
+            setMsg("Googleログイン失敗: " + error.message);
+          } else {
+            console.log("[AUTH] exchange ok. user:", data.session?.user?.id);
+          }
           url.search = "";
           window.history.replaceState({}, "", url.toString());
           await reloadAppData(); // ← この行を追加
         }
-        const { data } = await sb.auth.getSession();
+        const { data } = await sb.auth.getSession(); // 最終的なセッション確認
         if (!mounted) return;
         setSession(data.session ?? null);
         setUser(data.session?.user ?? null);
@@ -699,6 +724,28 @@ export default function Page() {
     );
   }, [allUsers, userFilter]);
 
+    // 入力の妥当性（開始>=終了）チェック
+  const invalidRange = useMemo(() => {
+    if (!proposalStart || !proposalEnd) return false;
+    return new Date(proposalStart).getTime() >= new Date(proposalEnd).getTime();
+  }, [proposalStart, proposalEnd]);
+
+  // 表示用ユーザー（重なりのみトグルに応じてフィルタ）
+  const displayUsers = useMemo(() => {
+    if (!showOverlapOnly) return filteredUsers;
+    if (!proposalStart || !proposalEnd) return filteredUsers;
+    return filteredUsers.filter(u => {
+      const ns = nextSlotMap[u.user_id] ?? null;
+      return !!(ns && hasOverlap(proposalStart, proposalEnd, ns.start_at, ns.end_at));
+    });
+  }, [showOverlapOnly, filteredUsers, nextSlotMap, proposalStart, proposalEnd, hasOverlap]);
+
+  // 直近スロットが全員分取得できていない（= RLSなどでゼロ件）の気づきやすさ向上
+  const noNextSlotsVisible = useMemo(() => {
+    if (loadingNextSlots || filteredUsers.length === 0) return false;
+    return filteredUsers.every(u => !nextSlotMap[u.user_id]);
+  }, [loadingNextSlots, filteredUsers, nextSlotMap]);
+
   useEffect(() => {
     return () => {
       try { chatChannelRef.current?.unsubscribe(); } catch {}
@@ -1034,6 +1081,27 @@ export default function Page() {
               </div>
 
               <div className="max-h-56 overflow-auto border rounded-md p-2">
+                <div className="mb-2 flex items-center gap-3">
+                  <label className="text-sm flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4"
+                      checked={showOverlapOnly}
+                      onChange={(e) => setShowOverlapOnly(e.target.checked)}
+                    />
+                    重なりのある相手のみ表示
+                  </label>
+                  {invalidRange && (
+                    <span className="text-xs text-amber-600">
+                      提案の「開始」は「終了」より前にしてください。
+                    </span>
+                  )}
+                </div>
+                {noNextSlotsVisible && (
+                  <div className="mb-2 text-xs text-amber-600">
+                    他ユーザーの「直近の空き」を取得できていません。RLSポリシー（未来スロットのSELECT許可）やデータ有無をご確認ください。
+                  </div>
+                )}
                 {filteredUsers.length === 0 ? (
                   <p className="text-sm text-muted-foreground">候補が見つかりません。</p>
                   ) : (
@@ -1043,14 +1111,22 @@ export default function Page() {
                         <th className="text-left py-2">ニックネーム</th>
                         <th className="text-left py-2">エリア</th>
                         <th className="text-left py-2">直近の空き</th>
+                        <th className="text-left py-2">一致</th>
                         <th />
                       </tr>
                     </thead>
                     <tbody>
-                      {filteredUsers.map((u) => {
+                      {displayUsers.map((u) => {
                         const ns = nextSlotMap[u.user_id] ?? null;
+                        const overlap =
+                          !!(proposalStart && proposalEnd && ns
+                            && hasOverlap(proposalStart, proposalEnd, ns.start_at, ns.end_at));
                         return (
-                        <tr key={u.user_id} className="border-b">
+                        <tr
+                          key={u.user_id}
+                          className={`border-b ${overlap ? "bg-emerald-50" : ""}`}
+                          aria-label={overlap ? "重なりあり" : "重なりなし"}
+                        >
                           <td className="py-2">{u.nickname ?? u.user_id.slice(0, 8)}</td>
                           <td className="py-2">{u.area_code ?? "-"}</td>
                           <td className="py-2">
@@ -1066,7 +1142,18 @@ export default function Page() {
                             ) : (
                               <span className="text-xs text-muted-foreground">-</span>
                             )}
-                          </td>                          
+                          </td>
+                          <td className="py-2">
+                            {proposalStart && proposalEnd ? (
+                              overlap ? (
+                                <span className="text-emerald-700 font-semibold">◎ 重なりあり</span>
+                              ) : (
+                                <span className="text-xs text-muted-foreground">—</span>
+                              )
+                            ) : (
+                              <span className="text-xs text-muted-foreground">（提案時間を選択）</span>
+                            )}
+                          </td>
                           <td className="py-2">
                           <div className="flex items-center gap-2">
                             <Button variant="outline" onClick={() => openProfileDetail(u.user_id)}>
@@ -1074,7 +1161,12 @@ export default function Page() {
                             </Button>
                             <Button
                               onClick={() => handleProposeMatch(u.user_id)}
-                              disabled={proposing[u.user_id] || busy || !proposalStart || !proposalEnd}
+                              disabled={
+                                proposing[u.user_id] ||
+                                busy ||
+                                !proposalStart || !proposalEnd ||
+                                invalidRange
+                              }
                             >
                               {proposing[u.user_id] ? "送信中…" : "提案"}
                             </Button>
