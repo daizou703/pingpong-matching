@@ -82,6 +82,8 @@ async function ensureProfile(user: User): Promise<ProfileRow> {
   return insData;
 }
 
+
+
 /* =========================
    Main Page Component
    ========================= */
@@ -104,7 +106,7 @@ export default function Page() {
   const [hand, setHand] = useState<Hand | null>(null);
   const [playingStyle, setPlayingStyle] = useState<PlayingStyle | null>(null);
   const [years, setYears] = useState<number | "">("");
-  const [purpose, setPurpose] = useState<string>("");
+  const [purpose, setPurpose] = useState<string[]>([]);
   const [avatarUrl, setAvatarUrl] = useState<string>("");
 
   // Availability state
@@ -144,6 +146,62 @@ export default function Page() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailProfile, setDetailProfile] = useState<ProfileRow | null>(null);
 
+  // 日本語ラベル変換
+  const GENDER_JP: Record<NonNullable<Gender>, string> = { male: "男", female: "女", other: "その他" };
+  const HAND_JP:   Record<NonNullable<Hand>, string>   = { right: "右", left: "左" };
+  const STYLE_JP:  Record<NonNullable<PlayingStyle>, string> = { shake: "シェーク", pen: "ペン", others: "その他" };
+
+  const jpGender = (g: Gender | null) => (g ? (GENDER_JP[g as NonNullable<Gender>] ?? String(g)) : "-");
+  const jpHand   = (h: Hand | null) => (h ? (HAND_JP[h as NonNullable<Hand>] ?? String(h)) : "-");
+  const jpStyle  = (s: PlayingStyle | null) => (s ? (STYLE_JP[s as NonNullable<PlayingStyle>] ?? String(s)) : "-");
+
+  // 目的の候補（保存値は英語コード、表示は日本語）
+  const PURPOSE_OPTIONS: { value: string; label: string }[] = [
+    { value: "multiball", label: "多球" },
+    { value: "serve",     label: "サーブ" },
+    { value: "match",     label: "ゲーム" },
+    { value: "basic",     label: "基礎" },
+  ];
+
+  // 汎用ピッカー（value: string[]、onChange で配列を返す）
+  function PurposePicker({
+    value,
+    onChange,
+    disabled,
+  }: {
+    value: string[];
+    onChange: (next: string[]) => void;
+    disabled?: boolean;
+  }) {
+    const toggle = (v: string) => {
+      const has = value.includes(v);
+      onChange(has ? value.filter((x) => x !== v) : [...value, v]);
+    };
+    return (
+      <div className="flex flex-wrap gap-2">
+        {PURPOSE_OPTIONS.map((opt) => {
+          const active = value.includes(opt.value);
+          return (
+            <button
+              key={opt.value}
+              type="button"
+              onClick={() => toggle(opt.value)}
+              disabled={disabled}
+              className={[
+                "px-3 py-1 rounded-full text-sm transition",
+                active
+                  ? "bg-foreground text-background"
+                  : "bg-secondary text-secondary-foreground hover:opacity-90",
+              ].join(" ")}
+            >
+              {opt.label}
+            </button>
+          );
+        })}
+      </div>
+    );
+  }
+
   // allUsers から見つからなければ profiles 1件フェッチ
   const openProfileDetail = useCallback(async (userId: string) => {
     setDetailOpen(true);
@@ -172,12 +230,18 @@ export default function Page() {
     setHand(pf.hand);
     setPlayingStyle(pf.play_style);
     setYears((pf.years as number | null) ?? "");
-    setPurpose((pf.purpose ?? []).join(","));
+    setPurpose(
+      Array.isArray(pf.purpose)
+        ? pf.purpose
+        : (pf.purpose
+            ? String(pf.purpose).split(",").map(s => s.trim()).filter(Boolean)
+            : [])
+    );
     setAvatarUrl(pf.avatar_url ?? "");
   };
   const resetForm = () => {
     setNickname(""); setLevel(""); setAreaCode(""); setGender(null); setHand(null); setPlayingStyle(null);
-    setYears(""); setPurpose(""); setAvatarUrl("");
+    setYears(""); setPurpose([]); setAvatarUrl("");
   };
 
   const fetchProfiles = useCallback(async (uid: string) => {
@@ -330,7 +394,7 @@ export default function Page() {
         hand,
         play_style: playingStyle,
         years: typeof years === "number" ? years : years === "" ? null : Number(years),
-        purpose: purpose.trim() === "" ? null : purpose.split(",").map((s) => s.trim()).filter(Boolean),
+        purpose: purpose.length ? purpose : null,
         avatar_url: avatarUrl || null,
       };
       // （列が実DBに無ければ型エラーで気付けます）
@@ -776,9 +840,9 @@ export default function Page() {
                       <SelectTrigger><SelectValue placeholder="未設定" /></SelectTrigger>
                       <SelectContent>
                         {/* ← 空文字の SelectItem は置かない */}
-                        <SelectItem value="male">male</SelectItem>
-                        <SelectItem value="female">female</SelectItem>
-                        <SelectItem value="other">other</SelectItem>
+                        <SelectItem value="male">男</SelectItem>
+                        <SelectItem value="female">女</SelectItem>
+                        <SelectItem value="other">その他</SelectItem>
                       </SelectContent>
                     </Select>
                     <Button type="button" variant="secondary" onClick={() => setGender(null)}>
@@ -796,8 +860,8 @@ export default function Page() {
                     >
                       <SelectTrigger><SelectValue placeholder="未設定" /></SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="right">right</SelectItem>
-                        <SelectItem value="left">left</SelectItem>
+                        <SelectItem value="right">右</SelectItem>
+                        <SelectItem value="left">左</SelectItem>
                       </SelectContent>
                     </Select>
                     <Button type="button" variant="secondary" onClick={() => setHand(null)}>
@@ -815,9 +879,9 @@ export default function Page() {
                     >
                       <SelectTrigger><SelectValue placeholder="未設定" /></SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="shake">shake</SelectItem>
-                        <SelectItem value="pen">pen</SelectItem>
-                        <SelectItem value="others">others</SelectItem>
+                        <SelectItem value="shake">シェーク</SelectItem>
+                        <SelectItem value="pen">ペン</SelectItem>
+                        <SelectItem value="others">その他</SelectItem>
                       </SelectContent>
                     </Select>
                     <Button type="button" variant="secondary" onClick={() => setPlayingStyle(null)}>
@@ -834,16 +898,10 @@ export default function Page() {
                     onChange={(e) => setYears(e.target.value === "" ? "" : Number(e.target.value))}
                   />
                 </div>
-
                 <div className="md:col-span-2 space-y-1">
-                  <Label>目的（カンマ区切り）</Label>
-                  <Input
-                    placeholder="ラリー, 試合, フットワーク練習 など"
-                    value={purpose}
-                    onChange={(e) => setPurpose(e.target.value)}
-                  />
+                  <Label>目的（複数選択可）</Label>
+                  <PurposePicker value={purpose} onChange={setPurpose} disabled={busy} />
                 </div>
-
                 <div className="md:col-span-2 space-y-1">
                   <Label>アバターURL</Label>
                   <Input value={avatarUrl} onChange={(e) => setAvatarUrl(e.target.value)} />
@@ -1139,9 +1197,19 @@ export default function Page() {
                 <div className="text-muted-foreground">エリア</div>
                 <div className="col-span-2">{detailProfile.area_code ?? "-"}</div>
                 <div className="text-muted-foreground">目的</div>
-                <div className="col-span-2">{detailProfile.purpose?.join("、") ?? "-"}</div>
+                <div className="col-span-2">
+                  {detailProfile.purpose?.length ? (
+                    <div className="flex flex-wrap gap-1">
+                      {detailProfile.purpose.map((p, i) => (
+                        <Badge key={`${p}-${i}`} variant="secondary">{p}</Badge>
+                      ))}
+                    </div>
+                  ) : (
+                    "-"
+                  )}
+                </div>
                 <div className="text-muted-foreground">プレースタイル</div>
-                <div className="col-span-2">{detailProfile.play_style ?? "-"}</div>
+                <div className="col-span-2">{jpStyle(detailProfile.play_style)}</div>
               </div>
               <Separator />
               <div>
