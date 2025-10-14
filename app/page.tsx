@@ -5,7 +5,6 @@ import type { User, Session, AuthChangeEvent, RealtimeChannel } from "@supabase/
 import type { RealtimePostgresChangesPayload } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabaseClient";
 import type { Tables, TablesInsert, TablesUpdate } from "@/types/supabase";
-import type { Database } from "@/types/supabase";
 
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -120,6 +119,16 @@ export default function Page() {
   // Browse users for proposal
   const [allUsers, setAllUsers] = useState<ProfileRow[]>([]);
   const [userFilter, setUserFilter] = useState<string>("");
+  // 他ユーザーの「直近の空き」マップ（取得列だけに絞った型）
+  // Supabaseのスキーマ上 user_id が null 取りうるため、UI側では string に正規化して扱う
+  type PublicSlot = {
+    user_id: string;
+    start_at: string;
+    end_at: string;
+    area_code: string | null;
+    venue_hint: string | null;
+  };
+  const [nextSlotMap, setNextSlotMap] = useState<Record<string, PublicSlot | null>>({});  const [loadingNextSlots, setLoadingNextSlots] = useState(false);
 
   // Matches & messages
   const [matches, setMatches] = useState<MatchRow[]>([]);
@@ -141,18 +150,13 @@ export default function Page() {
   const router = useRouter();
 
   // --- Profile Detail (相手の詳細表示) ---
-  type ProfileRow = Tables<"profiles">;
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailProfile, setDetailProfile] = useState<ProfileRow | null>(null);
 
   // 日本語ラベル変換
-  const GENDER_JP: Record<NonNullable<Gender>, string> = { male: "男", female: "女", other: "その他" };
-  const HAND_JP:   Record<NonNullable<Hand>, string>   = { right: "右", left: "左" };
   const STYLE_JP:  Record<NonNullable<PlayingStyle>, string> = { shake: "シェーク", pen: "ペン", others: "その他" };
 
-  const jpGender = (g: Gender | null) => (g ? (GENDER_JP[g as NonNullable<Gender>] ?? String(g)) : "-");
-  const jpHand   = (h: Hand | null) => (h ? (HAND_JP[h as NonNullable<Hand>] ?? String(h)) : "-");
   const jpStyle  = (s: PlayingStyle | null) => (s ? (STYLE_JP[s as NonNullable<PlayingStyle>] ?? String(s)) : "-");
 
   // 目的の候補（保存値は英語コード、表示は日本語）
@@ -271,14 +275,61 @@ export default function Page() {
     if (!error && data) setMatches(data);
   }, [sb]);
 
-  // ログイン後に呼ぶデータ再読込（関数名は調整自由）
-  // あるものだけ呼ぶ：まずは profiles の再取得に限定
+  // 他ユーザーの「直近の空き」を一括取得（現在時刻以降の最も早い1件）
+  const fetchNextSlotsForUsers = useCallback(async (userIds: string[]) => {
+    try {
+      setLoadingNextSlots(true);
+      if (!userIds.length) { setNextSlotMap({}); return; }
+      const nowIso = new Date().toISOString();
+      const { data, error } = await sb
+        .from("availability_slots")
+        .select("user_id,start_at,end_at,area_code,venue_hint")
+        .in("user_id", userIds)
+        .gte("start_at", nowIso)
+        .order("start_at", { ascending: true });
+      console.log("[next-slots] ids:", userIds.length, "rows:", data?.length ?? 0, "err:", error ?? null);
+      if (error) throw error;
+      // 先頭ヒットが「直近の空き」。ユーザーごとに最初の1件を採用
+      const rows = (data ?? []) as Array<{
+        user_id: string | null; start_at: string; end_at: string;
+        area_code: string | null; venue_hint: string | null;
+      }>;
+      const map: Record<string, PublicSlot | null> =
+        Object.fromEntries(userIds.map(id => [id, null]));
+      for (const row of rows) {
+        const uid = row.user_id;
+        if (!uid) continue; // ← null/空はスキップ（index型エラー対策）
+        if (map[uid] == null) {
+          map[uid] = {
+            user_id: uid,
+            start_at: row.start_at,
+            end_at: row.end_at,
+            area_code: row.area_code,
+            venue_hint: row.venue_hint,
+          };
+        }
+      }
+      setNextSlotMap(map);
+    } finally {
+      setLoadingNextSlots(false);
+    }
+  }, [sb]);
+
+  // 候補ユーザーの一覧が変わったら「直近の空き」を更新
+  useEffect(() => {
+    const ids = allUsers.map(u => u.user_id);
+    void fetchNextSlotsForUsers(ids);
+  }, [allUsers, fetchNextSlotsForUsers]);
+
+  // ログイン後にまとめて再読込
   const reloadAppData = useCallback(async () => {
     if (!user?.id) return; // 未ログイン時はスキップ
     await Promise.allSettled([
       fetchProfiles(user.id),
+      fetchSlots(user.id),
+      fetchMatches(user.id),
     ]);
-  }, [fetchProfiles, user?.id]);
+  }, [fetchProfiles, fetchSlots, fetchMatches, user?.id]);
 
   // OAuth コールバック交換＋URLクリーン
   useEffect(() => {
@@ -305,11 +356,7 @@ export default function Page() {
           const pf = await ensureProfile(data.session.user);
           if (!mounted) return;
           hydrateFormFromProfile(pf);
-          await Promise.all([
-            fetchSlots(data.session.user.id),
-            fetchProfiles(data.session.user.id),
-            fetchMatches(data.session.user.id),
-          ]);
+          await reloadAppData();
         }
       } catch (e: unknown) { console.error("[AUTH] init error:", e); }
     })();
@@ -321,14 +368,14 @@ export default function Page() {
       if (u) {
         const pf = await ensureProfile(u);
         hydrateFormFromProfile(pf);
-        await Promise.all([fetchSlots(u.id), fetchProfiles(u.id), fetchMatches(u.id)]);
+        await reloadAppData();
       } else {
         resetForm();
         setSlots([]); setAllUsers([]); setMatches([]); setActiveMatchId(null); setMessages([]);
       }
     });
     return () => { try { sub.subscription?.unsubscribe(); } catch {} mounted = false; };
-  }, [sb, fetchProfiles, fetchSlots, fetchMatches]);
+  }, [sb, reloadAppData]);
 
   const fetchMessages = async (matchId: NonNullable<MatchRow["id"]>) => {
     const { data, error } = await sb
@@ -469,7 +516,8 @@ export default function Page() {
     }
   };
 
-  const handleMatchStatus = async (matchId: MatchRow["id"], status: MatchStatus) => {
+  // ステータス更新：useCallback で安定化（Hook依存の警告を解消）
+  const handleMatchStatus = useCallback(async (matchId: MatchRow["id"], status: MatchStatus) => {
     if (!user || matchId == null) return;
     setBusy(true); setMsg(null);
     try {
@@ -481,16 +529,14 @@ export default function Page() {
         .maybeSingle();
       if (error) throw error;
       if (data) {
-        setMatches((prev) => prev.map((m) => m.id === matchId ? data : m));
+        setMatches(prev => prev.map(m => m.id === matchId ? data : m));
         setMsg(`ステータスを ${status} に更新しました。`);
       }
     } catch (e: unknown) { setMsg("ステータス更新に失敗: " + toErrMsg(e)); }
     finally { setBusy(false); }
-  };
+  }, [sb, user]);
 
-  // 受信者だけ／pending だけを許可する判定
-  type MatchRow = Database["public"]["Tables"]["matches"]["Row"];
-
+  // 受信者だけ／pending だけを許可する判定（上で定義済みの MatchRow を使用）
   const me = user?.id;
   const isReceiver = useCallback(
     (m: MatchRow) => !!me && m.user_b === me,
@@ -646,9 +692,12 @@ export default function Page() {
     }
   };
 
-  const filteredUsers = allUsers.filter((u) =>
-    userFilter ? (u.nickname ?? "").includes(userFilter) || (u.area_code ?? "").includes(userFilter) : true
-  );
+  const filteredUsers = useMemo(() => {
+    if (!userFilter) return allUsers;
+    return allUsers.filter((u) =>
+      (u.nickname ?? "").includes(userFilter) || (u.area_code ?? "").includes(userFilter)
+    );
+  }, [allUsers, userFilter]);
 
   useEffect(() => {
     return () => {
@@ -656,34 +705,7 @@ export default function Page() {
     };
   }, []);
 
-  // 起動時にセッションを取得して state に反映
-  useEffect(() => {
-    (async () => {
-      const { data: { session } } = await sb.auth.getSession();
-      setSession(session ?? null);
-      setUser(session?.user ?? null);
-    })();
-  }, [sb]);
-
-  // auth 状態の変化に追従して state とデータを同期
-  useEffect(() => {
-    const { data: { subscription } } = sb.auth.onAuthStateChange(async (_event, session) => {
-      setSession(session ?? null);
-      setUser(session?.user ?? null);
-
-      if (session?.user) {
-        // ログイン完了 → 初期データを再読込
-        await reloadAppData(); // ← 下で定義
-      } else {
-        // ログアウト → 画面からデータを消す
-        setMatches([]); setActiveMatchId(null); setMessages([]);
-        // 必要なら他の一覧もクリア
-      }
-    });
-    return () => subscription.unsubscribe();
-  }, [sb]);
-
-  // 選択中のマッチ相手（ニックネーム）をヘッダー表示用に取得
+    // 選択中のマッチ相手（ニックネーム）をヘッダー表示用に取得
   useEffect(() => {
     if (!user?.id || !activeMatchId) { setChatPeer(null); return; }
     const m = matches.find((mm) => mm.id === activeMatchId);
@@ -1014,20 +1036,37 @@ export default function Page() {
               <div className="max-h-56 overflow-auto border rounded-md p-2">
                 {filteredUsers.length === 0 ? (
                   <p className="text-sm text-muted-foreground">候補が見つかりません。</p>
-                ) : (
+                  ) : (
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="border-b">
                         <th className="text-left py-2">ニックネーム</th>
                         <th className="text-left py-2">エリア</th>
+                        <th className="text-left py-2">直近の空き</th>
                         <th />
                       </tr>
                     </thead>
                     <tbody>
-                      {filteredUsers.map((u) => (
+                      {filteredUsers.map((u) => {
+                        const ns = nextSlotMap[u.user_id] ?? null;
+                        return (
                         <tr key={u.user_id} className="border-b">
                           <td className="py-2">{u.nickname ?? u.user_id.slice(0, 8)}</td>
                           <td className="py-2">{u.area_code ?? "-"}</td>
+                          <td className="py-2">
+                            {loadingNextSlots ? (
+                              <span className="text-xs text-muted-foreground">読み込み中…</span>
+                            ) : ns ? (
+                              <div>
+                                <div>{fmtDate(ns.start_at)} — {fmtDate(ns.end_at)}</div>
+                                <div className="text-xs text-muted-foreground">
+                                  {ns.area_code}{ns.venue_hint ? ` / ${ns.venue_hint}` : ""}
+                                </div>
+                              </div>
+                            ) : (
+                              <span className="text-xs text-muted-foreground">-</span>
+                            )}
+                          </td>                          
                           <td className="py-2">
                           <div className="flex items-center gap-2">
                             <Button variant="outline" onClick={() => openProfileDetail(u.user_id)}>
@@ -1042,7 +1081,9 @@ export default function Page() {
                           </div>
                           </td>
                         </tr>
-                      ))}
+                        );
+                      })
+                      }
                     </tbody>
                   </table>
                 )}
