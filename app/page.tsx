@@ -54,6 +54,14 @@ type PlayingStyle  = ProfileRow["play_style"];
    ========================= */
 const fmtDate = (v: string | null | undefined) => (v ? dtFmt.format(new Date(v)) : "-");
 
+// datetime-local 文字列 ←→ ISO 変換ヘルパ
+const toLocalInput = (isoLike: string | null | undefined) => {
+  if (!isoLike) return "";
+  const d = new Date(isoLike);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+
 /** プロファイルが無ければ作る */
 async function ensureProfile(user: User): Promise<ProfileRow> {
   const { data: found, error: findErr } = await supabase
@@ -115,6 +123,16 @@ export default function Page() {
   const [slotArea, setSlotArea] = useState<string>("");
   const [venueHint, setVenueHint] = useState<string>("");
   const [isRecurring, setIsRecurring] = useState<boolean>(false);
+
+  // Availability 入力の妥当性
+  const invalidAvailRange = useMemo(() => {
+    if (!startAt || !endAt) return false;
+    return new Date(startAt).getTime() >= new Date(endAt).getTime();
+  }, [startAt, endAt]);
+  const pastAvailStart = useMemo(() => {
+    if (!startAt) return false;
+    return new Date(startAt).getTime() < Date.now();
+  }, [startAt]);
 
   // Browse users for proposal
   const [allUsers, setAllUsers] = useState<ProfileRow[]>([]);
@@ -422,6 +440,8 @@ export default function Page() {
     setBusy(true); setMsg(null);
     try {
       if (!startAt || !endAt || !slotArea) { setMsg("開始/終了日時とエリアは必須です"); return; }
+      if (invalidAvailRange) { setMsg("終了は開始より後の日時にしてください"); return; }
+      if (pastAvailStart) { setMsg("開始日時が過去です。未来の日時を指定してください"); return; }
       const payload: SlotInsert = {
         user_id: user.id,
         start_at: new Date(startAt).toISOString(),
@@ -991,10 +1011,16 @@ export default function Page() {
                 <div className="space-y-1">
                   <Label>開始日時</Label>
                   <Input type="datetime-local" value={startAt} onChange={(e) => setStartAt(e.target.value)} />
+                {pastAvailStart && (
+                  <div className="text-xs text-amber-600">開始が過去です。未来の日時を指定してください。</div>
+                )}
                 </div>
                 <div className="space-y-1">
                   <Label>終了日時</Label>
                   <Input type="datetime-local" value={endAt} onChange={(e) => setEndAt(e.target.value)} />
+                {invalidAvailRange && (
+                  <div className="text-xs text-amber-600">終了は開始より後にしてください。</div>
+                )}
                 </div>
                 <div className="space-y-1">
                   <Label>エリアコード</Label>
@@ -1009,7 +1035,7 @@ export default function Page() {
                   <span>繰り返し</span>
                 </label>
               </div>
-              <Button onClick={handleAddSlot} disabled={busy}>追加</Button>
+              <Button onClick={handleAddSlot} disabled={busy || invalidAvailRange || pastAvailStart}>追加</Button>
 
               <div>
                 {slots.length === 0 ? (
@@ -1071,6 +1097,43 @@ export default function Page() {
                 </div>
               </div>
 
+              {/* 自分の空きからワンクリック反映 */}
+              {slots.length > 0 && (
+                <div className="rounded-md border p-2">
+                  <div className="text-xs text-muted-foreground mb-1">自分の空きから提案時間に反映</div>
+                  <div className="max-h-28 overflow-auto">
+                    <table className="w-full text-xs">
+                      <tbody>
+                        {slots
+                          .filter((s) => !!s.start_at && new Date(s.start_at!).getTime() >= Date.now())
+                          .slice(0, 10)
+                          .map((s) => (
+                            <tr key={String(s.id)} className="border-b">
+                              <td className="py-1">{fmtDate(s.start_at)}</td>
+                              <td className="py-1">→ {fmtDate(s.end_at)}</td>
+                              <td className="py-1">{s.area_code ?? "-"}</td>
+                              <td className="py-1 text-right">
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => {
+                                    setProposalStart(toLocalInput(s.start_at ?? null));
+                                    setProposalEnd(toLocalInput(s.end_at ?? null));
+                                    setProposalVenue(s.venue_hint ?? "");
+                                  }}
+                                >反映</Button>
+                              </td>
+                            </tr>
+                          ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="mt-2">
+                    <Button variant="secondary" size="sm" onClick={() => { setProposalStart(""); setProposalEnd(""); setProposalVenue(""); }}>クリア</Button>
+                  </div>
+                </div>
+              )}
+              
               <div className="flex items-center gap-3">
                 <Input
                   placeholder="ニックネーム/エリアで絞り込み"
