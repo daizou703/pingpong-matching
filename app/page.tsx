@@ -17,6 +17,7 @@ import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 
 import { useRouter } from "next/navigation";
+import { CalendarClock, Users, Handshake, MessageSquare, UserCog, LogIn } from "lucide-react";
 
 // エラーを安全に文字列へ
 const toErrMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -852,16 +853,22 @@ export default function Page() {
   }, [user]);
 
   return (
-    <main style={{ maxWidth: 1100, margin: "24px auto", padding: "0 16px" }}>
-      <h1>卓球練習相手マッチングアプリ（プロトタイプ）</h1>
+    <main className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-emerald-50">
+      <div className="container mx-auto px-4 py-8 max-w-5xl text-gray-700">
+        <h1 className="text-3xl md:text-4xl font-semibold tracking-tight mb-4">
+          卓球練習相手マッチングアプリ（プロトタイプ）
+        </h1>
 
       {!user ? (
-        <Card className="mt-4">
-          <CardHeader>
+        <Card className="mt-4 rounded-2xl border border-gray-100 shadow-md hover:shadow-xl transition-shadow duration-300">
+          <CardHeader className="flex items-center gap-2 text-emerald-700">
+            <LogIn size={20} />
             <CardTitle>ログイン</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            <Button onClick={handleGoogleLogin} disabled={busy}>Googleでログイン</Button>
+            <Button onClick={handleGoogleLogin} disabled={busy} className="rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white">
+              Googleでログイン
+            </Button>
             <Separator />
             <div className="space-y-2">
               <Label>または、メールでログイン（Magic Link）</Label>
@@ -872,7 +879,7 @@ export default function Page() {
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                 />
-                <Button onClick={handleSendMagicLink} disabled={busy || !email.trim()}>
+                <Button onClick={handleSendMagicLink} disabled={busy || !email.trim()} className="rounded-xl">
                   リンクを送る
                 </Button>
               </div>
@@ -887,15 +894,22 @@ export default function Page() {
         </Card>
       ) : (
         <>
-          <section style={{ marginTop: 16 }}>
+          <section className="mt-4">
             <p><strong>ログイン中:</strong> {user.email ?? user.id}</p>
-            {msg && <p style={{ marginTop: 8, color: msg.includes("失敗") ? "crimson" : "green" }}>{msg}</p>}
-            <button onClick={handleLogout} disabled={busy} style={{ padding: "6px 10px" }}>ログアウト</button>
+            {msg && (
+              <p className={["mt-2", msg.includes("失敗") ? "text-red-600" : "text-green-700"].join(" ")}>
+                {msg}
+              </p>
+            )}
+            <Button onClick={handleLogout} disabled={busy} variant="outline" className="mt-2 rounded-xl">
+              ログアウト
+            </Button>
           </section>
 
           {/* Profile */}
-          <Card className="mt-6">
-            <CardHeader>
+          <Card className="mt-6 rounded-2xl border border-gray-100 shadow-md hover:shadow-xl transition-shadow duration-300">
+            <CardHeader className="flex items-center gap-2 text-emerald-700">
+              <UserCog size={20} />
               <CardTitle>プロフィール編集</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -998,14 +1012,19 @@ export default function Page() {
               </div>
 
               <div className="flex gap-2">
-                <Button onClick={handleSaveProfile} disabled={busy}>保存</Button>
+                <Button onClick={handleSaveProfile} disabled={busy} className="rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white">
+                  保存
+                </Button>
               </div>
             </CardContent>
           </Card>
 
           {/* Availability */}
-          <Card className="mt-6">
-            <CardHeader><CardTitle>空き時間（availability）</CardTitle></CardHeader>
+          <Card className="mt-6 rounded-2xl border border-gray-100 shadow-md hover:shadow-xl transition-shadow duration-300">
+            <CardHeader className="flex items-center gap-2 text-emerald-700">
+              <CalendarClock size={20} />
+              <CardTitle>空き時間（availability）</CardTitle>
+            </CardHeader>
             <CardContent className="space-y-3">
               <div className="grid md:grid-cols-2 gap-4">
                 <div className="space-y-1">
@@ -1035,7 +1054,9 @@ export default function Page() {
                   <span>繰り返し</span>
                 </label>
               </div>
-              <Button onClick={handleAddSlot} disabled={busy || invalidAvailRange || pastAvailStart}>追加</Button>
+              <Button onClick={handleAddSlot} disabled={busy || invalidAvailRange || pastAvailStart} className="rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white">
+                追加
+              </Button>
 
               <div>
                 {slots.length === 0 ? (
@@ -1075,8 +1096,11 @@ export default function Page() {
           </Card>
 
           {/* Propose & Matches */}
-          <Card className="mt-6">
-            <CardHeader><CardTitle>相手を探して提案</CardTitle></CardHeader>
+          <Card className="mt-6 rounded-2xl border border-gray-100 shadow-md hover:shadow-xl transition-shadow duration-300">
+            <CardHeader className="flex items-center gap-2 text-emerald-700">
+              <Handshake size={20} />
+              <CardTitle>相手を探して提案</CardTitle>
+            </CardHeader>
             <CardContent className="space-y-3">
               <div className="grid md:grid-cols-3 gap-4">
                 <div className="space-y-1">
@@ -1230,8 +1254,8 @@ export default function Page() {
                                 !proposalStart || !proposalEnd ||
                                 invalidRange
                               }
-                            >
-                              {proposing[u.user_id] ? "送信中…" : "提案"}
+                              className="rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white"
+                            >                              {proposing[u.user_id] ? "送信中…" : "提案"}
                             </Button>
                           </div>
                           </td>
@@ -1247,8 +1271,11 @@ export default function Page() {
           </Card>
 
           {/* My Matches */}
-          <Card className="mt-6">
-            <CardHeader><CardTitle>自分のマッチ</CardTitle></CardHeader>
+          <Card className="mt-6 rounded-2xl border border-gray-100 shadow-md hover:shadow-xl transition-shadow duration-300">
+            <CardHeader className="flex items-center gap-2 text-emerald-700">
+              <Users size={20} />
+              <CardTitle>自分のマッチ</CardTitle>
+            </CardHeader>
             <CardContent>
               {matches.length === 0 ? (
                 <p className="text-sm text-muted-foreground">まだマッチがありません。</p>
@@ -1286,6 +1313,7 @@ export default function Page() {
                                   variant="default"
                                   onClick={() => respondMatch(m, "confirmed")}
                                   disabled={busy || m.id == null}
+                                  className="rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white"
                                 >
                                   承諾
                                 </Button>
@@ -1294,12 +1322,15 @@ export default function Page() {
                                   variant="secondary"
                                   onClick={() => respondMatch(m, "cancelled")}
                                   disabled={busy || m.id == null}
+                                  className="rounded-xl"
                                 >
                                   辞退
                                 </Button>
                               </>
                             )}
-                            <Button variant="outline" onClick={() => openChat(m.id!)} disabled={busy || m.id == null}>チャット</Button>
+                            <Button variant="outline" onClick={() => openChat(m.id!)} disabled={busy || m.id == null} className="rounded-xl">
+                              チャット
+                            </Button>
                           </td>
                         </tr>
                       );
@@ -1311,9 +1342,10 @@ export default function Page() {
           </Card>
 
           {/* Chat */}
-          <Card className="mt-6">
-            <CardHeader>
-              <CardTitle>
+          <Card className="mt-6 rounded-2xl border border-gray-100 shadow-md hover:shadow-xl transition-shadow duration-300">
+            <CardHeader className="flex items-center gap-2 text-emerald-700">
+              <MessageSquare size={20} />
+              <CardTitle className="flex items-center">
                 チャット
                 {chatPeer && (
                   <span className="ml-3 text-base font-normal text-muted-foreground">
@@ -1328,8 +1360,8 @@ export default function Page() {
               ) : (
                 <>
                   <div className="flex gap-2">
-                    <Button variant="outline" onClick={() => activeMatchId != null && fetchMessages(activeMatchId)} disabled={busy}>更新</Button>
-                    <Button variant="secondary" onClick={() => { try { chatChannelRef.current?.unsubscribe(); } catch {}; setActiveMatchId(null); }} disabled={busy}>閉じる</Button>
+                    <Button variant="outline" onClick={() => activeMatchId != null && fetchMessages(activeMatchId)} disabled={busy} className="rounded-xl">更新</Button>
+                    <Button variant="secondary" onClick={() => { try { chatChannelRef.current?.unsubscribe(); } catch {}; setActiveMatchId(null); }} disabled={busy} className="rounded-xl">閉じる</Button>
                   </div>
                   <div className="max-h-60 overflow-auto border rounded-md p-3">
                     {messages.length === 0 ? (
@@ -1356,7 +1388,9 @@ export default function Page() {
                       onChange={(e) => setChatBody(e.target.value)}
                       onKeyDown={handleChatKeyDown}
                     />
-                    <Button onClick={handleSendMessage} disabled={busy || !chatBody.trim()}>送信</Button>
+                    <Button onClick={handleSendMessage} disabled={busy || !chatBody.trim()} className="rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white">
+                      送信
+                    </Button>
                   </div>
                 </>
               )}
@@ -1365,7 +1399,7 @@ export default function Page() {
         </>
       )}
 
-      <hr style={{ margin: "24px 0" }} />
+      <hr className="my-6" />
 
       {/* 相手プロフィールの詳細ダイアログ */}
       <Dialog open={detailOpen} onOpenChange={(o) => { setDetailOpen(o); if (!o) setDetailProfile(null); }}>
@@ -1418,6 +1452,7 @@ export default function Page() {
           )}
         </DialogContent>
       </Dialog>
+      </div>
     </main>
   );
 }
